@@ -37,7 +37,6 @@ WM_RBUTTONUP = 0x0205
 WM_LBUTTONDBLCLK = 0x0203
 NIM_ADD = 0x00000000
 NIM_DELETE = 0x00000002
-NIM_MODIFY = 0x00000001
 NIF_MESSAGE = 0x00000001
 NIF_ICON = 0x00000002
 NIF_TIP = 0x00000004
@@ -330,6 +329,7 @@ def escape_markdown_cell(value: object) -> str:
     text = text.replace("\\", "\\\\")
     text = text.replace("|", "\\|")
     text = text.replace("[", "\\[").replace("]", "\\]")
+    text = text.replace("(", "\\(").replace(")", "\\)")
     return text.strip()
 
 
@@ -343,9 +343,10 @@ def format_cell(cell: Cell | object) -> str:
         # URL内の閉じ括弧はMarkdownリンク構文を壊すため、最低限エンコードします。
         href = str(cell.href).replace(")", "%29")
         text = f"[{text}]({href})"
+    if cell.bold and cell.italic and text:
+        return f"***{text}***"
     if cell.italic and text:
-        italic_marker = "_" if cell.bold else "*"
-        text = f"{italic_marker}{text}{italic_marker}"
+        text = f"*{text}*"
     if cell.bold and text:
         text = f"**{text}**"
     return text
@@ -415,7 +416,7 @@ def read_clipboard_text() -> str:
             return ""
         pointer = kernel32.GlobalLock(handle)
         if not pointer:
-            return ""
+            raise MemoryError("Could not lock clipboard memory.")
         try:
             return ctypes.wstring_at(pointer)
         finally:
@@ -518,7 +519,8 @@ def convert_clipboard_or_excel_selection(prefer_excel: bool = True) -> str:
             # その場合でも、pywin32不要のプレーンテキスト変換へフォールバックします。
             pass
     markdown = convert_text_to_markdown(read_clipboard_text())
-    write_clipboard_text(markdown)
+    if markdown:
+        write_clipboard_text(markdown)
     return markdown
 
 
@@ -602,7 +604,6 @@ class TrayApplication:
         nid = self._notify_data()
         if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
             raise ctypes.WinError(ctypes.get_last_error())
-        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
 
     def _remove_tray_icon(self) -> None:
         """アプリ終了時にタスクトレイアイコンを削除します。"""
@@ -614,6 +615,8 @@ class TrayApplication:
         """タスクトレイアイコンの右クリックメニューを表示します。"""
 
         menu = user32.CreatePopupMenu()
+        if not menu:
+            return
         user32.AppendMenuW(menu, 0, MENU_CONVERT, f"Markdownに変換 ({self.hotkey.label})")
         user32.AppendMenuW(menu, 0, MENU_EXIT, "終了 (&X)")
         point = POINT()
@@ -663,6 +666,7 @@ class TrayApplication:
             if command == MENU_EXIT:
                 user32.DestroyWindow(hwnd)
                 return 0
+            return int(user32.DefWindowProcW(hwnd, message, wparam, lparam))
         # config.iniで指定したホットキーで変換を実行します。
         if message == WM_HOTKEY and wparam == HOTKEY_ID:
             self._convert_async()
