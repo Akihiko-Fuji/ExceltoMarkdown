@@ -59,17 +59,21 @@ prefer_excel = false
 
 指定できる修飾キーは `Ctrl` / `Alt` / `Shift` / `Win` です。通常キーは英数字1文字、`F1`〜`F24`、`Enter`、`Esc`、`Space`、`Tab`、矢印キーなどを指定できます。例: `Ctrl+Shift+M`、`Alt+F12`。 `Ctrl+Shift+V` はWindowsやOfficeで「テキストのみ貼り付け」に使われるため、既定値にはしていません。
 
-### 1回だけ変換して終了
+### 1回だけ変換して終了（Windowsのみ）
 
 ```powershell
 python excel_to_markdown.py --once
 ```
 
-### 標準入力で変換を確認
+`--once` はWindowsのクリップボード（および設定に応じてExcel選択範囲）を1回だけ変換して終了します。Windows APIを使うため、Linux/Unix/macOSでは利用できません。
+
+### 標準入力で変換を確認（OSを問わず利用可）
 
 ```powershell
 Get-Content sample.tsv -Raw | python excel_to_markdown.py --stdin
 ```
+
+`--stdin` はWindows APIを使わず、標準入力のTSVをMarkdownへ変換して標準出力へ書き出します。
 
 ## Excel書式の反映（任意）
 

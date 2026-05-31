@@ -190,6 +190,19 @@ class ConversionTests(unittest.TestCase):
         self.assertIn("COM unavailable", log_text)
         self.assertIn("| A | B |", markdown)
 
+    def test_excel_selection_fallback_continues_when_log_write_fails(self):
+        """ログ書き込み先に権限がなくてもクリップボードTSVへフォールバックします。"""
+
+        with (
+            patch("excel_to_markdown.pywin32_available", return_value=True),
+            patch("excel_to_markdown._excel_selection_to_rows", side_effect=RuntimeError("COM unavailable")),
+            patch("builtins.open", side_effect=PermissionError("read-only directory")),
+            patch("excel_to_markdown.read_clipboard_text", return_value="A\tB\n1\t2\n"),
+            patch("excel_to_markdown.write_clipboard_text"),
+        ):
+            markdown = convert_clipboard_or_excel_selection(prefer_excel=True)
+        self.assertIn("| A | B |", markdown)
+
     def test_read_clipboard_text_raises_when_global_lock_fails(self):
         """クリップボードメモリのロック失敗は空文字列ではなく例外として扱います。"""
 
@@ -290,6 +303,24 @@ class ConversionTests(unittest.TestCase):
             app._convert_safely()
         fake_user32.MessageBeep.assert_not_called()
         fake_user32.MessageBoxW.assert_called_once()
+
+    def test_convert_safely_reports_when_log_write_fails(self):
+        """変換失敗ログを書けなくてもエラーダイアログ表示まで進むことを確認します。"""
+
+        fake_user32 = SimpleNamespace(MessageBeep=Mock(), MessageBoxW=Mock())
+        app = object.__new__(TrayApplication)
+        app._convert_lock = e2m.threading.Lock()
+        app.prefer_excel = False
+        app.hwnd = 100
+        with (
+            patch("excel_to_markdown.user32", fake_user32),
+            patch("excel_to_markdown.convert_clipboard_or_excel_selection", side_effect=RuntimeError("boom")),
+            patch("builtins.open", side_effect=PermissionError("read-only directory")),
+        ):
+            app._convert_safely()
+        message = fake_user32.MessageBoxW.call_args.args[1]
+        self.assertIn("変換に失敗しました。", message)
+        self.assertIn("ログファイルへ書き込めませんでした。", message)
 
     def test_configure_windows_api_declares_window_and_tray_functions(self):
         """ウィンドウ管理・トレイ関連Win32 APIにもctypes型宣言を付けることを確認します。"""
