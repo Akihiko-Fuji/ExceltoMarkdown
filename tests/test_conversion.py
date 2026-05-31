@@ -2,7 +2,18 @@ import io
 import unittest
 from unittest.mock import patch
 
-from excel_to_markdown import Cell, convert_text_to_markdown, icon_path, main, rows_to_markdown
+from excel_to_markdown import (
+    MOD_ALT,
+    MOD_CONTROL,
+    Cell,
+    config_path,
+    convert_text_to_markdown,
+    icon_path,
+    load_hotkey_config,
+    main,
+    parse_hotkey,
+    rows_to_markdown,
+)
 
 
 class ConversionTests(unittest.TestCase):
@@ -29,10 +40,26 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(rows_to_markdown(rows), expected)
 
     def test_icon_path_uses_e2m_ico(self):
-        """タスクトレイ用アイコンとしてE2M.icoを参照することを確認します。"""
+        """タスクトレイ用アイコンとしてe2m_ico.icoを参照することを確認します。"""
 
-        self.assertEqual(icon_path().name, "E2M.ico")
+        self.assertEqual(icon_path().name, "e2m_ico.ico")
         self.assertTrue(icon_path().exists())
+
+    def test_default_config_file_defines_hotkey(self):
+        """config.iniから変換ショートカットを読み込むことを確認します。"""
+
+        hotkey = load_hotkey_config(config_path())
+        self.assertEqual(hotkey.label, "Ctrl+Alt+M")
+        self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_ALT)
+        self.assertEqual(hotkey.virtual_key, ord("M"))
+
+    def test_parse_hotkey_supports_function_keys(self):
+        """修飾キー付きのファンクションキーも設定できることを確認します。"""
+
+        hotkey = parse_hotkey("Ctrl+Alt+F12")
+        self.assertEqual(hotkey.label, "Ctrl+Alt+F12")
+        self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_ALT)
+        self.assertEqual(hotkey.virtual_key, 0x7B)
 
     def test_main_rejects_non_windows(self):
         """Linux/UnixなどWindows以外ではアプリ本体が動作しないことを確認します。"""

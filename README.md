@@ -5,10 +5,10 @@ Excelでコピーした表をMarkdownテーブルに変換し、クリップボ�
 
 - Windows専用です。
 - Excelで範囲をコピーした後、タスクトレイ常駐アプリからMarkdownテーブルへ変換します。
-- ホットキー `Ctrl+Alt+M`、タスクトレイの右クリックメニュー、またはトレイアイコンのダブルクリックで変換できます。
+- ホットキーは `config.ini` の `key` で指定できます（初期値は `Ctrl+Alt+M`）。タスクトレイの右クリックメニュー、またはトレイアイコンのダブルクリックでも変換できます。
 - 標準ライブラリのみでクリップボード内のTSVをMarkdown化できます。
 - 任意で `pywin32` を入れると、起動中のExcelの選択範囲から太字、イタリック、ハイパーリンクを読み取り、Markdownへ反映します。
-- タスクトレイと実行ファイルのアイコンには、同梱の `e2m_ico.ico を利用します。
+- タスクトレイと実行ファイルのアイコンには、同梱の `e2m_ico.ico` を利用します。
 
 ## 変換例
 
@@ -38,8 +38,19 @@ python excel_to_markdown.py
 ```
 
 1. Excelで表の範囲をコピーします。
-2. `Ctrl+Alt+M` を押すか、タスクトレイアイコンのメニューから「Markdownに変換」を選びます。
+2. `config.ini` に設定したショートカットキー（初期値は `Ctrl+Alt+M`）を押すか、タスクトレイアイコンのメニューから「Markdownに変換」を選びます。
 3. クリップボードの内容がMarkdownテーブルに置き換わるので、`.md` ファイルへ貼り付けます。
+
+### ショートカットキーの設定
+
+`excel_to_markdown.py` と同じフォルダー（EXE配布時はEXEと同じフォルダー）にある `config.ini` で、変換に使うショートカットキーを指定します。
+
+```ini
+[shortcut]
+key = Ctrl+Alt+M
+```
+
+指定できる修飾キーは `Ctrl` / `Alt` / `Shift` / `Win` です。通常キーは英数字1文字、`F1`〜`F24`、`Enter`、`Esc`、`Space`、`Tab`、矢印キーなどを指定できます。例: `Ctrl+Shift+M`、`Alt+F12`。 `Ctrl+Shift+V` はWindowsやOfficeで「テキストのみ貼り付け」に使われるため、既定値にはしていません。
 
 ### 1回だけ変換して終了
 
@@ -65,11 +76,11 @@ python -m pip install pywin32
 
 ## Windows Executableとして配布する例
 
-配布用EXEを作る場合は、ビルド環境だけにPyInstallerを入れる構成にすると、実行時コード側の依存を増やさずに済みます。`E2M.ico` はEXEアイコンおよび実行時のタスクトレイアイコンとして同梱してください。
+配布用EXEを作る場合は、ビルド環境だけにPyInstallerを入れる構成にすると、実行時コード側の依存を増やさずに済みます。`e2m_ico.ico` はEXEアイコンおよび実行時のタスクトレイアイコンとして同梱してください。`config.ini` はショートカット変更用にEXEと同じフォルダーへ配置してください。
 
 ```powershell
 python -m pip install pyinstaller
-pyinstaller --onefile --noconsole --name ExceltoMarkdown --icon E2M.ico --add-data "E2M.ico;." excel_to_markdown.py
+pyinstaller --onefile --noconsole --name ExceltoMarkdown --icon e2m_ico.ico --add-data "e2m_ico.ico;." excel_to_markdown.py
 ```
 
 書式反映も含めて配布したい場合は、ビルド環境に `pywin32` もインストールしてからPyInstallerを実行してください。

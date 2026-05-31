@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import ctypes
 import importlib
 import importlib.util
@@ -48,12 +49,16 @@ LR_LOADFROMFILE = 0x00000010
 LR_DEFAULTSIZE = 0x00000040
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 
 MENU_CONVERT = 1001
 MENU_EXIT = 1002
-APP_ICON_FILENAME = "E2M.ico"
+APP_ICON_FILENAME = "e2m_ico.ico"
+CONFIG_FILENAME = "config.ini"
+DEFAULT_HOTKEY = "Ctrl+Alt+M"
 
 # 非Windows環境でも変換ロジックの単体テストを実行できるよう、DLL参照を遅延させます。
 user32 = ctypes.windll.user32 if sys.platform == "win32" else None
@@ -112,13 +117,27 @@ def resource_path(filename: str) -> Path:
 
 
 def icon_path() -> Path:
-    """タスクトレイと実行ファイルで使うE2M.icoのパスを返します。"""
+    """タスクトレイと実行ファイルで使うe2m_ico.icoのパスを返します。"""
 
     return resource_path(APP_ICON_FILENAME)
 
 
+def app_base_dir() -> Path:
+    """実行中アプリと同じ場所にある設定ファイルの基準ディレクトリを返します。"""
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def config_path() -> Path:
+    """ショートカット設定を読み取るconfig.iniのパスを返します。"""
+
+    return app_base_dir() / CONFIG_FILENAME
+
+
 def load_application_icon():
-    """E2M.icoをWin32アイコンとして読み込みます。"""
+    """e2m_ico.icoをWin32アイコンとして読み込みます。"""
 
     _require_windows()
     path = icon_path()
@@ -188,6 +207,15 @@ class NOTIFYICONDATA(ctypes.Structure):
 
 
 @dataclass(frozen=True)
+class HotkeyConfig:
+    """WindowsのRegisterHotKeyへ渡すショートカット設定です。"""
+
+    label: str
+    modifiers: int
+    virtual_key: int
+
+
+@dataclass(frozen=True)
 class Cell:
     """セルの値とMarkdownへ反映したい簡易書式情報を保持します。"""
 
@@ -195,6 +223,102 @@ class Cell:
     bold: bool = False
     italic: bool = False
     href: str | None = None
+
+
+_MODIFIER_ALIASES = {
+    "ctrl": ("Ctrl", MOD_CONTROL),
+    "control": ("Ctrl", MOD_CONTROL),
+    "alt": ("Alt", MOD_ALT),
+    "shift": ("Shift", MOD_SHIFT),
+    "win": ("Win", MOD_WIN),
+    "windows": ("Win", MOD_WIN),
+}
+
+_KEY_ALIASES = {
+    "enter": 0x0D,
+    "return": 0x0D,
+    "esc": 0x1B,
+    "escape": 0x1B,
+    "space": 0x20,
+    "tab": 0x09,
+    "backspace": 0x08,
+    "delete": 0x2E,
+    "del": 0x2E,
+    "insert": 0x2D,
+    "ins": 0x2D,
+    "home": 0x24,
+    "end": 0x23,
+    "pageup": 0x21,
+    "pagedown": 0x22,
+    "pgup": 0x21,
+    "pgdn": 0x22,
+    "up": 0x26,
+    "down": 0x28,
+    "left": 0x25,
+    "right": 0x27,
+}
+
+for _number in range(1, 25):
+    _KEY_ALIASES[f"f{_number}"] = 0x70 + _number - 1
+
+
+def _parse_virtual_key(key_name: str) -> tuple[str, int]:
+    """設定文字列のキー名をWin32仮想キーコードへ変換します。"""
+
+    normalized = key_name.strip().lower()
+    if len(normalized) == 1 and normalized.isalnum():
+        return normalized.upper(), ord(normalized.upper())
+    if normalized in _KEY_ALIASES:
+        label = "F" + normalized[1:] if normalized.startswith("f") and normalized[1:].isdigit() else key_name.strip()
+        return label, _KEY_ALIASES[normalized]
+    raise ValueError(f"未対応のショートカットキーです: {key_name}")
+
+
+def parse_hotkey(value: str) -> HotkeyConfig:
+    """Ctrl+Alt+M形式の設定値をRegisterHotKey用の値へ変換します。"""
+
+    parts = [part.strip() for part in value.replace("-", "+").split("+") if part.strip()]
+    if not parts:
+        raise ValueError("ショートカットキーが空です。")
+    modifiers = 0
+    modifier_labels: list[str] = []
+    key_label: str | None = None
+    virtual_key: int | None = None
+    for part in parts:
+        normalized = part.lower()
+        if normalized in _MODIFIER_ALIASES:
+            label, flag = _MODIFIER_ALIASES[normalized]
+            if modifiers & flag:
+                continue
+            modifiers |= flag
+            modifier_labels.append(label)
+            continue
+        if virtual_key is not None:
+            raise ValueError(f"ショートカットの通常キーは1つだけ指定してください: {value}")
+        key_label, virtual_key = _parse_virtual_key(part)
+    if virtual_key is None or key_label is None:
+        raise ValueError(f"ショートカットには通常キーを1つ指定してください: {value}")
+    if modifiers == 0:
+        raise ValueError(f"ショートカットにはCtrl/Alt/Shift/Winのいずれかを指定してください: {value}")
+    return HotkeyConfig("+".join([*modifier_labels, key_label]), modifiers, virtual_key)
+
+
+def load_hotkey_config(path: Path | None = None) -> HotkeyConfig:
+    """config.iniからショートカットキー設定を読み込みます。"""
+
+    config_file = path or config_path()
+    parser = configparser.ConfigParser()
+    if config_file.exists():
+        parser.read(config_file, encoding="utf-8")
+
+    value = DEFAULT_HOTKEY
+    if parser.has_option("shortcut", "key"):
+        value = parser.get("shortcut", "key")
+    elif parser.has_option("hotkey", "key"):
+        value = parser.get("hotkey", "key")
+    elif parser.has_option("DEFAULT", "shortcut"):
+        value = parser.get("DEFAULT", "shortcut")
+    return parse_hotkey(value)
 
 
 def escape_markdown_cell(value: object) -> str:
@@ -395,6 +519,7 @@ class TrayApplication:
         """非表示ウィンドウとメッセージ処理コールバックの準備を行います。"""
 
         _require_windows()
+        self.hotkey = load_hotkey_config()
         self.hinstance = kernel32.GetModuleHandleW(None)
         self.class_name = "ExcelToMarkdownTrayWindow"
         self.hwnd = None
@@ -408,7 +533,8 @@ class TrayApplication:
         self._register_window_class()
         self._create_window()
         self._add_tray_icon()
-        user32.RegisterHotKey(self.hwnd, HOTKEY_ID, MOD_CONTROL | MOD_ALT, ord("M"))
+        if not user32.RegisterHotKey(self.hwnd, HOTKEY_ID, self.hotkey.modifiers, self.hotkey.virtual_key):
+            raise ctypes.WinError(ctypes.get_last_error())
         msg = MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
             user32.TranslateMessage(ctypes.byref(msg))
@@ -456,7 +582,7 @@ class TrayApplication:
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP
         nid.uCallbackMessage = WM_TRAYICON
         nid.hIcon = load_application_icon()
-        nid.szTip = "Excel to Markdown (Ctrl+Alt+M)"
+        nid.szTip = f"Excel to Markdown ({self.hotkey.label})"
         return nid
 
     def _add_tray_icon(self) -> None:
@@ -477,7 +603,7 @@ class TrayApplication:
         """タスクトレイアイコンの右クリックメニューを表示します。"""
 
         menu = user32.CreatePopupMenu()
-        user32.AppendMenuW(menu, 0, MENU_CONVERT, "Markdownに変換 (&M)")
+        user32.AppendMenuW(menu, 0, MENU_CONVERT, f"Markdownに変換 ({self.hotkey.label})")
         user32.AppendMenuW(menu, 0, MENU_EXIT, "終了 (&X)")
         point = POINT()
         user32.GetCursorPos(ctypes.byref(point))
@@ -526,7 +652,7 @@ class TrayApplication:
             if command == MENU_EXIT:
                 user32.DestroyWindow(hwnd)
                 return 0
-        # 既定ホットキー（Ctrl+Alt+M）で変換を実行します。
+        # config.iniで指定したホットキーで変換を実行します。
         if message == WM_HOTKEY and wparam == HOTKEY_ID:
             self._convert_async()
             return 0
