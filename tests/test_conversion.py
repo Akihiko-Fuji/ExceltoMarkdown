@@ -1,11 +1,15 @@
 import io
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import excel_to_markdown as e2m
 from excel_to_markdown import (
     MOD_ALT,
     MOD_CONTROL,
+    MOD_SHIFT,
     Cell,
     config_path,
     convert_clipboard_or_excel_selection,
@@ -67,11 +71,32 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_ALT)
         self.assertEqual(hotkey.virtual_key, 0x7B)
 
+    def test_default_shortcut_does_not_override_inherited_section_key(self):
+        """DEFAULT由来のkeyをshortcutセクション直下のkeyとして誤認しないことを確認します。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text(
+                "[DEFAULT]\nkey = Ctrl+Alt+X\nshortcut = Ctrl+Shift+Z\n[shortcut]\nname = ignored\n",
+                encoding="utf-8",
+            )
+            hotkey = load_hotkey_config(config_file)
+        self.assertEqual(hotkey.label, "Ctrl+Shift+Z")
+        self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_SHIFT)
+        self.assertEqual(hotkey.virtual_key, ord("Z"))
+
     def test_bold_italic_formatting_uses_triple_marker(self):
         """太字とイタリックを併用するセルはGFM互換の一括マーカーで整形します。"""
 
         rows = [[Cell("Title", bold=True, italic=True)], ["x"]]
         expected = "| ***Title*** |\n| --- |\n| x |\n"
+        self.assertEqual(rows_to_markdown(rows), expected)
+
+    def test_link_text_keeps_parentheses_readable(self):
+        """リンクテキスト内の丸括弧はバックスラッシュ表示にならないことを確認します。"""
+
+        rows = [[Cell("Report (final)", href="https://example.com/a)b")], ["x"]]
+        expected = "| [Report (final)](https://example.com/a%29b) |\n| --- |\n| x |\n"
         self.assertEqual(rows_to_markdown(rows), expected)
 
     def test_escape_markdown_cell_escapes_parentheses(self):
@@ -135,6 +160,61 @@ class ConversionTests(unittest.TestCase):
         with patch("excel_to_markdown.shell32", fake_shell32):
             app._add_tray_icon()
         fake_shell32.Shell_NotifyIconW.assert_called_once()
+
+    def test_configure_windows_api_declares_window_and_tray_functions(self):
+        """ウィンドウ管理・トレイ関連Win32 APIにもctypes型宣言を付けることを確認します。"""
+
+        user32_names = [
+            "OpenClipboard",
+            "CloseClipboard",
+            "EmptyClipboard",
+            "GetClipboardData",
+            "SetClipboardData",
+            "LoadImageW",
+            "RegisterClassW",
+            "CreateWindowExW",
+            "DefWindowProcW",
+            "DestroyWindow",
+            "RegisterHotKey",
+            "UnregisterHotKey",
+            "GetMessageW",
+            "TranslateMessage",
+            "DispatchMessageW",
+            "PostQuitMessage",
+            "CreatePopupMenu",
+            "AppendMenuW",
+            "TrackPopupMenu",
+            "DestroyMenu",
+            "GetCursorPos",
+            "SetForegroundWindow",
+            "MessageBeep",
+            "MessageBoxW",
+        ]
+        kernel32_names = [
+            "GetModuleHandleW",
+            "GlobalAlloc",
+            "GlobalLock",
+            "GlobalUnlock",
+            "GlobalFree",
+        ]
+        fake_user32 = SimpleNamespace(**{name: Mock() for name in user32_names})
+        fake_kernel32 = SimpleNamespace(**{name: Mock() for name in kernel32_names})
+        fake_shell32 = SimpleNamespace(Shell_NotifyIconW=Mock())
+
+        with (
+            patch("sys.platform", "win32"),
+            patch("excel_to_markdown.user32", fake_user32),
+            patch("excel_to_markdown.kernel32", fake_kernel32),
+            patch("excel_to_markdown.shell32", fake_shell32),
+        ):
+            e2m._configure_windows_api()
+
+        for api in [*user32_names, *kernel32_names]:
+            function = getattr(fake_user32, api, None) or getattr(fake_kernel32, api, None)
+            self.assertIn("argtypes", vars(function), api)
+            self.assertIn("restype", vars(function), api)
+        self.assertIn("argtypes", vars(fake_shell32.Shell_NotifyIconW))
+        self.assertIn("restype", vars(fake_shell32.Shell_NotifyIconW))
 
     def test_unknown_wm_command_delegates_to_default_window_proc(self):
         """未処理のWM_COMMANDは明示的にDefWindowProcWへ委譲します。"""
