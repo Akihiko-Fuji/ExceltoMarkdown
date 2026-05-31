@@ -15,6 +15,7 @@ import ctypes
 import importlib
 import importlib.util
 import io
+import re
 import sys
 import threading
 import time
@@ -22,6 +23,7 @@ import traceback
 from pathlib import Path
 from dataclasses import dataclass
 from ctypes import wintypes
+from html.parser import HTMLParser
 from typing import Iterable, Sequence
 
 # WindowsではWINFUNCTYPE、非Windowsのテスト環境ではCFUNCTYPEを使います。
@@ -53,13 +55,23 @@ MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
+HTML_CLIPBOARD_FORMAT_NAME = "HTML Format"
 
-MENU_CONVERT = 1001
-MENU_EXIT = 1002
+MENU_CONVERT_TABLE = 1001
+MENU_CONVERT_RICH_TEXT = 1002
+MENU_EXIT = 1003
+# 後方互換のため、既存テストや外部利用のMENU_CONVERT名は表変換コマンドとして残します。
+MENU_CONVERT = MENU_CONVERT_TABLE
 APP_ICON_FILENAME = "e2m_ico.ico"
 CONFIG_FILENAME = "config.ini"
 DEFAULT_HOTKEY = "Ctrl+Alt+M"
 DEFAULT_PREFER_EXCEL = False
+DEFAULT_CONVERSION_MODE = "table"
+CONVERSION_MODE_TABLE = "table"
+CONVERSION_MODE_RICH_TEXT = "rich_text"
+CONVERSION_MODE_AUTO = "auto"
+SUPPORTED_CONVERSION_MODES = {CONVERSION_MODE_TABLE, CONVERSION_MODE_RICH_TEXT}
+INTERNAL_CONVERSION_MODES = {*SUPPORTED_CONVERSION_MODES, CONVERSION_MODE_AUTO}
 MAX_EXCEL_SELECTION_CELLS = 5000
 CLIPBOARD_OPEN_RETRIES = 10
 CLIPBOARD_OPEN_DELAY_SECONDS = 0.05
@@ -136,6 +148,10 @@ def _configure_windows_api() -> None:
     user32.EmptyClipboard.restype = wintypes.BOOL
     user32.GetClipboardData.argtypes = [wintypes.UINT]
     user32.GetClipboardData.restype = wintypes.HANDLE
+    user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+    user32.RegisterClipboardFormatW.restype = wintypes.UINT
     user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
     user32.SetClipboardData.restype = wintypes.HANDLE
     user32.LoadImageW.argtypes = [
@@ -214,6 +230,8 @@ def _configure_windows_api() -> None:
     kernel32.GlobalLock.restype = wintypes.LPVOID
     kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
     kernel32.GlobalUnlock.restype = wintypes.BOOL
+    kernel32.GlobalSize.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalSize.restype = ctypes.c_size_t
     kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
     kernel32.GlobalFree.restype = wintypes.HGLOBAL
 
@@ -466,6 +484,31 @@ def load_prefer_excel_config(path: Path | None = None) -> bool:
     return _parse_config_bool(explicit_value)
 
 
+def normalize_conversion_mode(value: str) -> str:
+    """config.iniやCLIから受け取った変換モード名を正規化します。"""
+
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized not in SUPPORTED_CONVERSION_MODES:
+        raise ValueError(f"未対応の変換モードです: {value}")
+    return normalized
+
+
+def load_default_conversion_mode_config(path: Path | None = None) -> str:
+    """ホットキーやダブルクリックで使う既定変換モードをconfig.iniから読み込みます。"""
+
+    config_file = path or config_path()
+    parser = configparser.ConfigParser()
+    if config_file.exists():
+        parser.read(config_file, encoding="utf-8")
+
+    explicit_value = _get_explicit_config_option(parser, "conversion", "default_mode")
+    if explicit_value is None:
+        explicit_value = _get_explicit_config_option(parser, parser.default_section, "default_mode")
+    if explicit_value is None:
+        return DEFAULT_CONVERSION_MODE
+    return normalize_conversion_mode(explicit_value)
+
+
 def escape_markdown_cell(value: object) -> str:
     """Markdown表の列区切りを壊す文字をセル内で安全にエスケープします。"""
 
@@ -551,6 +594,211 @@ def convert_text_to_markdown(text: str) -> str:
     return rows_to_markdown(tsv_to_rows(text))
 
 
+def convert_table_to_markdown(text: str) -> str:
+    """表変換経路を明示するための別名です。既存TSV変換ロジックをそのまま使います。"""
+
+    return convert_text_to_markdown(text)
+
+
+def escape_markdown_text(value: object) -> str:
+    """通常文章用のMarkdownエスケープを行います。表セル用とは独立させます。"""
+
+    text = "" if value is None else str(value)
+    for character in ("\\", "*", "_", "`", "[", "]"):
+        text = text.replace(character, "\\" + character)
+    return text
+
+
+class _RichHtmlToMarkdownParser(HTMLParser):
+    """ブラウザやOffice由来の簡易HTML断片をMarkdown文章へ変換するパーサーです。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._list_stack: list[dict[str, int | str]] = []
+        self._link_stack: list[str] = []
+        self._style_marker_stack: list[list[str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag == "br":
+            self._ensure_line_break()
+            return
+        if tag in {"p", "div"}:
+            self._ensure_paragraph_break()
+        elif tag in {"ul", "ol"}:
+            self._ensure_line_break()
+            self._list_stack.append({"tag": tag, "index": 1})
+        elif tag == "li":
+            self._start_list_item()
+
+        if tag in {"strong", "b"}:
+            self._parts.append("**")
+        elif tag in {"em", "i"}:
+            self._parts.append("*")
+        elif tag == "a":
+            href = ""
+            for name, value in attrs:
+                if name and name.lower() == "href" and value:
+                    href = value.replace(")", "%29")
+                    break
+            self._link_stack.append(href)
+            self._parts.append("[")
+
+        style_markers = self._style_markers(
+            attrs,
+            skip_bold=tag in {"strong", "b"},
+            skip_italic=tag in {"em", "i"},
+        )
+        self._style_marker_stack.append(style_markers)
+        self._parts.extend(style_markers)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        style_markers = self._style_marker_stack.pop() if self._style_marker_stack else []
+        self._parts.extend(reversed(style_markers))
+        if tag in {"strong", "b"}:
+            self._parts.append("**")
+        elif tag in {"em", "i"}:
+            self._parts.append("*")
+        elif tag == "a":
+            href = self._link_stack.pop() if self._link_stack else ""
+            self._parts.append(f"]({href})" if href else "]")
+        elif tag in {"p", "div"}:
+            self._ensure_paragraph_break()
+        elif tag == "li":
+            self._ensure_line_break()
+        elif tag in {"ul", "ol"}:
+            if self._list_stack:
+                self._list_stack.pop()
+            self._ensure_paragraph_break()
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "br":
+            self._ensure_line_break()
+        else:
+            self.handle_starttag(tag, attrs)
+            self.handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        if not data:
+            return
+        text = re.sub(r"\s+", " ", data)
+        if not text.strip():
+            if self._parts and not self._parts[-1].endswith((" ", "\n", "[")):
+                self._parts.append(" ")
+            return
+        self._parts.append(escape_markdown_text(text))
+
+    def markdown(self) -> str:
+        text = "".join(self._parts)
+        lines = [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+        compacted: list[str] = []
+        blank_count = 0
+        for line in lines:
+            if line.strip():
+                compacted.append(line.rstrip())
+                blank_count = 0
+            else:
+                blank_count += 1
+                if blank_count <= 1 and compacted:
+                    compacted.append("")
+        while compacted and not compacted[-1]:
+            compacted.pop()
+        return "\n".join(compacted) + ("\n" if compacted else "")
+
+    def _ensure_line_break(self) -> None:
+        if not self._parts:
+            return
+        current = "".join(self._parts)
+        if not current.endswith("\n"):
+            self._parts.append("\n")
+
+    def _ensure_paragraph_break(self) -> None:
+        if not self._parts:
+            return
+        current = "".join(self._parts).rstrip(" ")
+        if not current:
+            return
+        if current.endswith("\n\n"):
+            return
+        if current.endswith("\n"):
+            self._parts.append("\n")
+        else:
+            self._parts.append("\n\n")
+
+    def _start_list_item(self) -> None:
+        self._ensure_line_break()
+        indent = "  " * max(len(self._list_stack) - 1, 0)
+        marker = "- "
+        if self._list_stack and self._list_stack[-1]["tag"] == "ol":
+            index = int(self._list_stack[-1]["index"])
+            marker = f"{index}. "
+            self._list_stack[-1]["index"] = index + 1
+        self._parts.append(f"{indent}{marker}")
+
+    def _style_markers(
+        self,
+        attrs: list[tuple[str, str | None]],
+        *,
+        skip_bold: bool = False,
+        skip_italic: bool = False,
+    ) -> list[str]:
+        markers: list[str] = []
+        style = ""
+        for name, value in attrs:
+            if name and name.lower() == "style" and value:
+                style = value
+                break
+        if not style:
+            return markers
+        declarations: dict[str, str] = {}
+        for declaration in style.split(";"):
+            if ":" not in declaration:
+                continue
+            property_name, property_value = declaration.split(":", 1)
+            declarations[property_name.strip().lower()] = property_value.strip().lower()
+        font_weight = declarations.get("font-weight", "")
+        font_style = declarations.get("font-style", "")
+        if not skip_bold and _is_bold_weight(font_weight):
+            markers.append("**")
+        if not skip_italic and font_style == "italic":
+            markers.append("*")
+        return markers
+
+
+def _is_bold_weight(value: str) -> bool:
+    """CSSのfont-weight値がMarkdown太字として扱う重みかを返します。"""
+
+    normalized = value.strip().lower()
+    if normalized in {"bold", "bolder"}:
+        return True
+    if normalized.isdigit():
+        return int(normalized) >= 600
+    return False
+
+
+def convert_html_fragment_to_markdown(html_fragment: str) -> str:
+    """HTML断片を依存ライブラリなしでMarkdown文章へ変換します。"""
+
+    parser = _RichHtmlToMarkdownParser()
+    parser.feed(html_fragment)
+    parser.close()
+    return parser.markdown()
+
+
+def convert_html_to_markdown(text: str) -> str:
+    """HTML文字列をMarkdown文章へ変換します。"""
+
+    return convert_html_fragment_to_markdown(text)
+
+
+def convert_rich_text_to_markdown(text: str) -> str:
+    """後方互換用のHTML文字列変換別名です。"""
+
+    return convert_html_to_markdown(text)
+
+
 def _require_windows() -> None:
     """Win32 APIが必要な処理をWindows以外で実行しないようにします。"""
 
@@ -591,6 +839,113 @@ def read_clipboard_text() -> str:
             kernel32.GlobalUnlock(handle)
     finally:
         user32.CloseClipboard()
+
+
+def register_clipboard_format(format_name: str) -> int:
+    """Windowsクリップボードの名前付き形式を登録し、形式IDを返します。"""
+
+    _require_windows()
+    format_id = user32.RegisterClipboardFormatW(format_name)
+    if not format_id:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(format_id)
+
+
+def clipboard_has_format(format_name: str) -> bool:
+    """指定した名前付きクリップボード形式が現在利用可能かを返します。"""
+
+    format_id = register_clipboard_format(format_name)
+    return bool(user32.IsClipboardFormatAvailable(format_id))
+
+
+def _read_clipboard_format_bytes(format_id: int) -> bytes:
+    """開いているクリップボードから任意形式のバイト列を読み取ります。"""
+
+    handle = user32.GetClipboardData(format_id)
+    if not handle:
+        return b""
+    size = int(kernel32.GlobalSize(handle))
+    pointer = kernel32.GlobalLock(handle)
+    if not pointer:
+        raise MemoryError("Could not lock clipboard memory.")
+    try:
+        if size <= 0:
+            return ctypes.string_at(pointer).rstrip(b"\0")
+        return ctypes.string_at(pointer, size).rstrip(b"\0")
+    finally:
+        kernel32.GlobalUnlock(handle)
+
+
+def extract_clipboard_html_fragment(clipboard_html: bytes | str) -> str:
+    """Clipboard HTML Format全体からStartFragment〜EndFragmentのHTML断片を抽出します。"""
+
+    raw = clipboard_html.encode("utf-8") if isinstance(clipboard_html, str) else clipboard_html
+    header_text = raw[: min(len(raw), 4096)].decode("ascii", errors="ignore")
+    offsets: dict[str, int] = {}
+    for name in ("StartHTML", "EndHTML", "StartFragment", "EndFragment"):
+        match = re.search(rf"{name}:\s*(\d+)", header_text, flags=re.IGNORECASE)
+        if match:
+            offsets[name] = int(match.group(1))
+    start = offsets.get("StartFragment")
+    end = offsets.get("EndFragment")
+    if start is None or end is None:
+        start = offsets.get("StartHTML")
+        end = offsets.get("EndHTML")
+    if start is None or end is None:
+        raise ValueError("Clipboard HTML Format header does not contain fragment offsets.")
+    if start < 0 or end < start or end > len(raw):
+        raise ValueError(f"Clipboard HTML Format offsets are invalid: start={start}, end={end}, length={len(raw)}")
+    return raw[start:end].decode("utf-8")
+
+
+def read_clipboard_html_fragment() -> str:
+    """Windows ClipboardのHTML FormatからHTML断片を読み取ります。"""
+
+    format_id = register_clipboard_format(HTML_CLIPBOARD_FORMAT_NAME)
+    open_clipboard_with_retry()
+    try:
+        if not user32.IsClipboardFormatAvailable(format_id):
+            return ""
+        data = _read_clipboard_format_bytes(format_id)
+    finally:
+        user32.CloseClipboard()
+    if not data:
+        return ""
+    return extract_clipboard_html_fragment(data)
+
+
+def read_clipboard_plain_text() -> str:
+    """将来の複数形式分岐から呼び出しやすいプレーンテキスト読取別名です。"""
+
+    return read_clipboard_text()
+
+
+def _log_rich_text_html_fallback(error: BaseException) -> None:
+    """HTML Formatの読取・解析失敗時にプレーンテキストへ戻る理由をログへ残します。"""
+
+    def write_fallback_reason(log_file) -> None:
+        print("HTML Formatの取得または解析に失敗したため、プレーンテキストへフォールバックします。", file=log_file)
+        traceback.print_exception(type(error), error, error.__traceback__, file=log_file)
+
+    write_error_log(write_fallback_reason)
+
+
+def convert_clipboard_rich_text_to_markdown() -> str:
+    """HTML Formatを優先し、なければプレーンテキストを返すリッチテキスト変換経路です。"""
+
+    markdown = ""
+    try:
+        if clipboard_has_format(HTML_CLIPBOARD_FORMAT_NAME):
+            html_fragment = read_clipboard_html_fragment()
+            if html_fragment:
+                markdown = convert_html_fragment_to_markdown(html_fragment)
+    except Exception as error:
+        _log_rich_text_html_fallback(error)
+    if not markdown:
+        markdown = read_clipboard_plain_text()
+    if markdown:
+        write_clipboard_text(markdown)
+    return markdown
 
 
 def write_clipboard_text(text: str) -> None:
@@ -715,10 +1070,29 @@ def convert_clipboard_or_excel_selection(prefer_excel: bool = DEFAULT_PREFER_EXC
             # Excelが起動していない、または選択範囲がRangeではない場合があります。
             # その場合でも、理由をログに残してプレーンテキスト変換へフォールバックします。
             _log_excel_selection_fallback(error)
-    markdown = convert_text_to_markdown(read_clipboard_text())
+    markdown = convert_table_to_markdown(read_clipboard_text())
     if markdown:
         write_clipboard_text(markdown)
     return markdown
+
+
+def convert_clipboard_to_markdown(mode: str = DEFAULT_CONVERSION_MODE, prefer_excel: bool = DEFAULT_PREFER_EXCEL) -> str:
+    """指定モードに応じてクリップボード内容をMarkdownへ変換します。"""
+
+    mode = mode.strip().lower().replace("-", "_")
+    if mode not in INTERNAL_CONVERSION_MODES:
+        raise ValueError(f"未対応の変換モードです: {mode}")
+    if mode == CONVERSION_MODE_TABLE:
+        return convert_clipboard_or_excel_selection(prefer_excel=prefer_excel)
+    if mode == CONVERSION_MODE_RICH_TEXT:
+        return convert_clipboard_rich_text_to_markdown()
+    # autoは今後の判定強化用です。現時点ではHTML Formatがある場合だけ文章変換を選びます。
+    try:
+        if clipboard_has_format(HTML_CLIPBOARD_FORMAT_NAME):
+            return convert_clipboard_rich_text_to_markdown()
+    except Exception as error:
+        _log_rich_text_html_fallback(error)
+    return convert_clipboard_or_excel_selection(prefer_excel=prefer_excel)
 
 
 class TrayApplication:
@@ -730,6 +1104,7 @@ class TrayApplication:
         _require_windows()
         self.hotkey = load_hotkey_config()
         self.prefer_excel = load_prefer_excel_config()
+        self.default_mode = load_default_conversion_mode_config()
         self._convert_lock = threading.Lock()
         self.hinstance = kernel32.GetModuleHandleW(None)
         self.class_name = "ExcelToMarkdownTrayWindow"
@@ -821,7 +1196,8 @@ class TrayApplication:
         menu = user32.CreatePopupMenu()
         if not menu:
             return
-        user32.AppendMenuW(menu, 0, MENU_CONVERT, f"Markdownに変換 ({self.hotkey.label})")
+        user32.AppendMenuW(menu, 0, MENU_CONVERT_TABLE, "Markdown表に変換")
+        user32.AppendMenuW(menu, 0, MENU_CONVERT_RICH_TEXT, "リッチテキストをMarkdown化")
         user32.AppendMenuW(menu, 0, MENU_EXIT, "終了 (&X)")
         point = POINT()
         user32.GetCursorPos(ctypes.byref(point))
@@ -830,24 +1206,29 @@ class TrayApplication:
             menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, point.x, point.y, 0, self.hwnd, None
         )
         user32.DestroyMenu(menu)
-        if command == MENU_CONVERT:
-            self._convert_async()
+        if command == MENU_CONVERT_TABLE:
+            self._convert_async(CONVERSION_MODE_TABLE)
+        elif command == MENU_CONVERT_RICH_TEXT:
+            self._convert_async(CONVERSION_MODE_RICH_TEXT)
         elif command == MENU_EXIT:
             user32.DestroyWindow(self.hwnd)
 
-    def _convert_async(self) -> None:
+    def _convert_async(self, mode: str | None = None) -> None:
         """UIのメッセージループを止めないよう、変換処理を別スレッドで実行します。"""
 
-        threading.Thread(target=self._convert_safely, daemon=True).start()
+        threading.Thread(target=self._convert_safely, args=(mode,), daemon=True).start()
 
-    def _convert_safely(self) -> None:
+    def _convert_safely(self, mode: str | None = None) -> None:
         """例外をログへ残しつつ、クリップボード内容をMarkdownへ変換します。"""
 
         if not self._convert_lock.acquire(blocking=False):
             user32.MessageBeep(0xFFFFFFFF)
             return
         try:
-            markdown = convert_clipboard_or_excel_selection(prefer_excel=self.prefer_excel)
+            markdown = convert_clipboard_to_markdown(
+                mode or getattr(self, "default_mode", DEFAULT_CONVERSION_MODE),
+                prefer_excel=self.prefer_excel,
+            )
             if markdown:
                 user32.MessageBeep(0xFFFFFFFF)
             else:
@@ -880,8 +1261,11 @@ class TrayApplication:
             return 0
         if message == WM_COMMAND:
             command = wparam & 0xFFFF
-            if command == MENU_CONVERT:
-                self._convert_async()
+            if command == MENU_CONVERT_TABLE:
+                self._convert_async(CONVERSION_MODE_TABLE)
+                return 0
+            if command == MENU_CONVERT_RICH_TEXT:
+                self._convert_async(CONVERSION_MODE_RICH_TEXT)
                 return 0
             if command == MENU_EXIT:
                 user32.DestroyWindow(hwnd)
@@ -903,8 +1287,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI引数を解釈し、標準入力・1回変換・常駐起動の各モードを実行します。"""
 
     parser = argparse.ArgumentParser(description="Convert Excel TSV clipboard text to Markdown.")
-    parser.add_argument("--stdin", action="store_true", help="read TSV from stdin and write Markdown to stdout")
+    parser.add_argument("--stdin", action="store_true", help="read TSV from stdin and write Markdown table to stdout")
     parser.add_argument("--once", action="store_true", help="convert clipboard once and exit")
+    parser.add_argument(
+        "--mode",
+        choices=sorted(SUPPORTED_CONVERSION_MODES),
+        default=None,
+        help="conversion mode for --once (default: config.ini conversion.default_mode)",
+    )
     args = parser.parse_args(argv)
 
     if args.stdin:
@@ -914,7 +1304,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("ExceltoMarkdownはWindows専用です。--stdinのみ非Windowsでも利用できます。", file=sys.stderr)
         return 1
     if args.once:
-        convert_clipboard_or_excel_selection(prefer_excel=load_prefer_excel_config())
+        convert_clipboard_to_markdown(
+            mode=args.mode or load_default_conversion_mode_config(),
+            prefer_excel=load_prefer_excel_config(),
+        )
         return 0
     TrayApplication().run()
     return 0
