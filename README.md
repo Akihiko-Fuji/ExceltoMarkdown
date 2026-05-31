@@ -1,15 +1,15 @@
 
-Excelでコピーした表をMarkdownテーブルに変換し、クリップボードへ戻すWindows向けツールです。
+Excelでコピーした表をMarkdownテーブルに変換する小型ツールです。Windowsではクリップボード常駐アプリとして使え、Linux/Unix/macOSなどでも標準入力のTSV変換を利用できます。
 
 ## できること
 
-- Excelで範囲をコピーした後、タスクトレイ常駐アプリからMarkdownテーブルへ変換します。
+- Windowsでは、Excelで範囲をコピーした後、タスクトレイ常駐アプリからMarkdownテーブルへ変換します。
 - ホットキーは `config.ini` の `key` で指定できます（初期値は `Ctrl+Alt+M`）。タスクトレイの右クリックメニュー、またはトレイアイコンのダブルクリックでも変換できます。
 - 標準ライブラリのみでクリップボード内のTSVをMarkdown化できます。
-- 任意で `pywin32` を入れると、起動中のExcelの選択範囲から太字、イタリック、ハイパーリンクを読み取り、Markdownへ反映します。
+- 任意で `pywin32` を入れ、`config.ini` の `prefer_excel = true` を指定すると、起動中のExcelの選択範囲から太字、イタリック、ハイパーリンクを読み取り、Markdownへ反映します。
 - タスクトレイと実行ファイルのアイコンには、同梱の `e2m_ico.ico` を利用します。
-- Windows専用です。
-- 
+- クリップボードTSV変換では、セル内タブ・セル内改行を含むデータは正しく復元できない場合があります。書式やセル単位の取得を重視する場合は、Windows上でExcel選択範囲変換を有効にしてください。
+
 ## 変換例
 
 Excelのコピー結果が次のテキストの場合:
@@ -48,6 +48,11 @@ python excel_to_markdown.py
 ```ini
 [shortcut]
 key = Ctrl+Alt+M
+
+[conversion]
+# 通常はコピー済みクリップボードTSVを優先します。
+# trueにすると、pywin32利用時だけExcelの現在選択範囲を先に読み取ります。
+prefer_excel = false
 ```
 
 指定できる修飾キーは `Ctrl` / `Alt` / `Shift` / `Win` です。通常キーは英数字1文字、`F1`〜`F24`、`Enter`、`Esc`、`Space`、`Tab`、矢印キーなどを指定できます。例: `Ctrl+Shift+M`、`Alt+F12`。 `Ctrl+Shift+V` はWindowsやOfficeで「テキストのみ貼り付け」に使われるため、既定値にはしていません。
@@ -72,7 +77,7 @@ Get-Content sample.tsv -Raw | python excel_to_markdown.py --stdin
 python -m pip install pywin32
 ```
 
-`pywin32` がない環境では、Excelがクリップボードに置いたプレーンテキスト（TSV）だけを使って変換します。
+`pywin32` がない環境、または `prefer_excel = false` の環境では、Excelがクリップボードに置いたプレーンテキスト（TSV）だけを使って変換します。`prefer_excel = true` は太字・イタリック・リンクを反映したい場合に有効ですが、Excelの現在選択範囲がコピー済みクリップボード内容と異なる場合は、現在選択範囲が変換対象になります。
 
 ## Windows Executableとして配布する例
 
@@ -91,4 +96,4 @@ pyinstaller --onefile --noconsole --name ExceltoMarkdown --icon e2m_ico.ico --ad
 python -m unittest
 ```
 
-変換ロジックの単体テストはLinux/Unix上でも実行できますが、アプリ本体（CLIの `main`、クリップボード操作、タスクトレイ常駐）はWindows以外では動作しません。
+変換ロジックの単体テストと `--stdin` 変換はLinux/Unix上でも実行できます。クリップボード操作、Excel COM連携、タスクトレイ常駐はWindows APIを使うためWindows上で利用してください。

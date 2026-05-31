@@ -14,9 +14,9 @@ import configparser
 import ctypes
 import importlib
 import importlib.util
-import io
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from dataclasses import dataclass
@@ -58,11 +58,18 @@ MENU_EXIT = 1002
 APP_ICON_FILENAME = "e2m_ico.ico"
 CONFIG_FILENAME = "config.ini"
 DEFAULT_HOTKEY = "Ctrl+Alt+M"
+DEFAULT_PREFER_EXCEL = False
+MAX_EXCEL_SELECTION_CELLS = 5000
+CLIPBOARD_OPEN_RETRIES = 10
+CLIPBOARD_OPEN_DELAY_SECONDS = 0.05
 
 # 非Windows環境でも変換ロジックの単体テストを実行できるよう、DLL参照を遅延させます。
-user32 = ctypes.windll.user32 if sys.platform == "win32" else None
-kernel32 = ctypes.windll.kernel32 if sys.platform == "win32" else None
-shell32 = ctypes.windll.shell32 if sys.platform == "win32" else None
+if sys.platform == "win32":
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+else:
+    user32 = kernel32 = shell32 = None
 
 
 class POINT(ctypes.Structure):
@@ -263,10 +270,6 @@ def load_application_icon() -> wintypes.HANDLE:
     return icon
 
 
-
-_configure_windows_api()
-
-
 @dataclass(frozen=True)
 class HotkeyConfig:
     """WindowsのRegisterHotKeyへ渡すショートカット設定です。"""
@@ -369,23 +372,22 @@ def parse_hotkey(value: str) -> HotkeyConfig:
 def _get_explicit_config_option(parser: configparser.ConfigParser, section: str, option: str) -> str | None:
     """DEFAULTから継承された値ではなく、セクション直下に書かれた値だけを返します。"""
 
+    option_norm = parser.optionxform(option)
+    defaults = parser.defaults()
+    if section == parser.default_section:
+        return defaults.get(option_norm)
     if not parser.has_section(section):
         return None
 
-    disabled_default_section = "__e2m_disabled_defaults__"
-    while parser.has_section(disabled_default_section) or parser.default_section == disabled_default_section:
-        disabled_default_section = f"_{disabled_default_section}"
-
-    serialized_config = io.StringIO()
-    parser.write(serialized_config)
-    serialized_config.seek(0)
-
-    section_only_parser = configparser.ConfigParser(default_section=disabled_default_section)
-    section_only_parser.optionxform = parser.optionxform
-    section_only_parser.read_file(serialized_config)
-    if not section_only_parser.has_option(section, option):
+    saved_defaults = dict(defaults)
+    defaults.clear()
+    try:
+        option_is_explicit = parser.has_option(section, option)
+    finally:
+        defaults.update(saved_defaults)
+    if not option_is_explicit:
         return None
-    return section_only_parser.get(section, option)
+    return parser.get(section, option)
 
 
 def load_hotkey_config(path: Path | None = None) -> HotkeyConfig:
@@ -403,9 +405,38 @@ def load_hotkey_config(path: Path | None = None) -> HotkeyConfig:
         value = explicit_shortcut_key
     elif explicit_hotkey_key is not None:
         value = explicit_hotkey_key
-    elif parser.optionxform("shortcut") in parser.defaults():
-        value = parser.get(parser.default_section, "shortcut")
+    else:
+        explicit_default_shortcut = _get_explicit_config_option(parser, parser.default_section, "shortcut")
+        if explicit_default_shortcut is not None:
+            value = explicit_default_shortcut
     return parse_hotkey(value)
+
+
+def _parse_config_bool(value: str) -> bool:
+    """config.iniの真偽値文字列をboolへ変換します。"""
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "yes", "true", "on", "enabled"}:
+        return True
+    if normalized in {"0", "no", "false", "off", "disabled"}:
+        return False
+    raise ValueError(f"真偽値として解釈できない設定値です: {value}")
+
+
+def load_prefer_excel_config(path: Path | None = None) -> bool:
+    """Excel選択範囲をクリップボードTSVより優先するかをconfig.iniから読み込みます。"""
+
+    config_file = path or config_path()
+    parser = configparser.ConfigParser()
+    if config_file.exists():
+        parser.read(config_file, encoding="utf-8")
+
+    explicit_value = _get_explicit_config_option(parser, "conversion", "prefer_excel")
+    if explicit_value is None:
+        explicit_value = _get_explicit_config_option(parser, parser.default_section, "prefer_excel")
+    if explicit_value is None:
+        return DEFAULT_PREFER_EXCEL
+    return _parse_config_bool(explicit_value)
 
 
 def escape_markdown_cell(value: object) -> str:
@@ -494,18 +525,27 @@ def convert_text_to_markdown(text: str) -> str:
 
 
 def _require_windows() -> None:
-    """Windows専用処理を誤ってLinux/Unix/macOSで実行しないようにします。"""
+    """Win32 APIが必要な処理をWindows以外で実行しないようにします。"""
 
     if not is_windows():
-        raise RuntimeError("このアプリケーションはWindows専用です。Linux/Unix/macOSでは動作しません。")
+        raise RuntimeError("この処理にはWindowsのクリップボード/タスクトレイAPIが必要です。")
+
+
+def open_clipboard_with_retry(retries: int = CLIPBOARD_OPEN_RETRIES, delay: float = CLIPBOARD_OPEN_DELAY_SECONDS) -> None:
+    """他アプリが一瞬クリップボードを掴んでいる場合に備えてOpenClipboardを短く再試行します。"""
+
+    _require_windows()
+    for _ in range(retries):
+        if user32.OpenClipboard(None):
+            return
+        time.sleep(delay)
+    raise OSError("Could not open clipboard.")
 
 
 def read_clipboard_text() -> str:
     """WindowsクリップボードからUnicodeテキストを読み取ります。"""
 
-    _require_windows()
-    if not user32.OpenClipboard(None):
-        raise OSError("Could not open clipboard.")
+    open_clipboard_with_retry()
     try:
         handle = user32.GetClipboardData(CF_UNICODETEXT)
         if not handle:
@@ -538,9 +578,11 @@ def write_clipboard_text(text: str) -> None:
         ctypes.memmove(pointer, encoded, byte_count)
     finally:
         kernel32.GlobalUnlock(handle)
-    if not user32.OpenClipboard(None):
+    try:
+        open_clipboard_with_retry()
+    except Exception:
         kernel32.GlobalFree(handle)
-        raise OSError("Could not open clipboard.")
+        raise
     try:
         user32.EmptyClipboard()
         result = user32.SetClipboardData(CF_UNICODETEXT, handle)
@@ -571,6 +613,9 @@ def _excel_selection_to_rows() -> list[list[Cell]]:
     selection = excel.Selection
     row_count = int(selection.Rows.Count)
     col_count = int(selection.Columns.Count)
+    cell_count = row_count * col_count
+    if cell_count > MAX_EXCEL_SELECTION_CELLS:
+        raise ValueError(f"選択範囲が大きすぎます: {row_count} x {col_count}")
     rows: list[list[Cell]] = []
     for row_index in range(1, row_count + 1):
         row: list[Cell] = []
@@ -600,8 +645,8 @@ def _excel_selection_to_rows() -> list[list[Cell]]:
     return rows
 
 
-def convert_clipboard_or_excel_selection(prefer_excel: bool = True) -> str:
-    """可能ならExcel選択範囲を、失敗時はクリップボードTSVをMarkdown化します。"""
+def convert_clipboard_or_excel_selection(prefer_excel: bool = DEFAULT_PREFER_EXCEL) -> str:
+    """設定に応じてExcel選択範囲、またはクリップボードTSVをMarkdown化します。"""
 
     if prefer_excel and pywin32_available():
         # pywin32があれば、クリップボードのプレーンテキストより先にExcel本体の選択範囲を試します。
@@ -628,6 +673,8 @@ class TrayApplication:
 
         _require_windows()
         self.hotkey = load_hotkey_config()
+        self.prefer_excel = load_prefer_excel_config()
+        self._convert_lock = threading.Lock()
         self.hinstance = kernel32.GetModuleHandleW(None)
         self.class_name = "ExcelToMarkdownTrayWindow"
         self.hwnd = None
@@ -641,11 +688,16 @@ class TrayApplication:
 
         self._register_window_class()
         self._create_window()
-        self._add_tray_icon()
         if not user32.RegisterHotKey(self.hwnd, HOTKEY_ID, self.hotkey.modifiers, self.hotkey.virtual_key):
             raise ctypes.WinError(ctypes.get_last_error())
+        self._add_tray_icon()
         msg = MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+        while True:
+            result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if result == -1:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if result == 0:
+                break
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
@@ -735,14 +787,22 @@ class TrayApplication:
     def _convert_safely(self) -> None:
         """例外をログへ残しつつ、クリップボード内容をMarkdownへ変換します。"""
 
-        try:
-            convert_clipboard_or_excel_selection(prefer_excel=True)
+        if not self._convert_lock.acquire(blocking=False):
             user32.MessageBeep(0xFFFFFFFF)
+            return
+        try:
+            markdown = convert_clipboard_or_excel_selection(prefer_excel=self.prefer_excel)
+            if markdown:
+                user32.MessageBeep(0xFFFFFFFF)
+            else:
+                user32.MessageBoxW(self.hwnd, "変換対象のテキストがありません。", "Excel to Markdown", 0x40)
         except Exception:
             log_path = app_base_dir() / "excel_to_markdown_error.log"
             with open(log_path, "a", encoding="utf-8") as log_file:
                 traceback.print_exc(file=log_file)
             user32.MessageBoxW(self.hwnd, f"変換に失敗しました。\n{log_path}", "Excel to Markdown", 0x10)
+        finally:
+            self._convert_lock.release()
 
     def _window_proc(
         self,
@@ -784,10 +844,6 @@ class TrayApplication:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI引数を解釈し、標準入力・1回変換・常駐起動の各モードを実行します。"""
 
-    if not is_windows():
-        print("ExceltoMarkdownはWindows専用です。Linux/Unix/macOSでは動作しません。", file=sys.stderr)
-        return 1
-
     parser = argparse.ArgumentParser(description="Convert Excel TSV clipboard text to Markdown.")
     parser.add_argument("--stdin", action="store_true", help="read TSV from stdin and write Markdown to stdout")
     parser.add_argument("--once", action="store_true", help="convert clipboard once and exit")
@@ -797,10 +853,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(convert_text_to_markdown(sys.stdin.read()))
         return 0
     if args.once:
-        convert_clipboard_or_excel_selection(prefer_excel=True)
+        convert_clipboard_or_excel_selection(prefer_excel=load_prefer_excel_config())
         return 0
     TrayApplication().run()
     return 0
+
+
+_configure_windows_api()
 
 
 if __name__ == "__main__":

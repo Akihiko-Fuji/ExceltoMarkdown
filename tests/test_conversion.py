@@ -17,6 +17,7 @@ from excel_to_markdown import (
     escape_markdown_cell,
     icon_path,
     load_hotkey_config,
+    load_prefer_excel_config,
     main,
     parse_hotkey,
     read_clipboard_text,
@@ -99,6 +100,20 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_SHIFT)
         self.assertEqual(hotkey.virtual_key, ord("Y"))
 
+    def test_explicit_shortcut_key_interpolates_default_value(self):
+        """セクション直下のkeyがDEFAULT値を補間している場合も正しく読み込みます。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text(
+                "[DEFAULT]\nmod = Ctrl+Alt\n[shortcut]\nkey = %(mod)s+M\n",
+                encoding="utf-8",
+            )
+            hotkey = load_hotkey_config(config_file)
+        self.assertEqual(hotkey.label, "Ctrl+Alt+M")
+        self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_ALT)
+        self.assertEqual(hotkey.virtual_key, ord("M"))
+
     def test_bold_italic_formatting_uses_triple_marker(self):
         """太字とイタリックを併用するセルはGFM互換の一括マーカーで整形します。"""
 
@@ -170,6 +185,26 @@ class ConversionTests(unittest.TestCase):
             app._show_menu()
         fake_user32.AppendMenuW.assert_not_called()
 
+    def test_run_registers_hotkey_before_adding_tray_icon(self):
+        """ホットキー登録に失敗した場合に死んだトレイアイコンを残さない順序にします。"""
+
+        calls = []
+        fake_user32 = SimpleNamespace(
+            RegisterHotKey=Mock(side_effect=lambda *args: calls.append("register_hotkey") or False),
+        )
+        app = object.__new__(TrayApplication)
+        app.hotkey = SimpleNamespace(modifiers=MOD_CONTROL | MOD_ALT, virtual_key=ord("M"))
+        app.hwnd = 1
+        app._register_window_class = Mock(side_effect=lambda: calls.append("register_class"))
+        app._create_window = Mock(side_effect=lambda: calls.append("create_window"))
+        app._add_tray_icon = Mock(side_effect=lambda: calls.append("add_tray_icon"))
+
+        with patch("excel_to_markdown.user32", fake_user32), self.assertRaises(Exception):
+            app.run()
+
+        self.assertEqual(calls, ["register_class", "create_window", "register_hotkey"])
+        app._add_tray_icon.assert_not_called()
+
     def test_add_tray_icon_only_adds_once(self):
         """タスクトレイ追加時は同一データで不要な更新呼び出しを行いません。"""
 
@@ -181,6 +216,41 @@ class ConversionTests(unittest.TestCase):
         with patch("excel_to_markdown.shell32", fake_shell32):
             app._add_tray_icon()
         fake_shell32.Shell_NotifyIconW.assert_called_once()
+
+
+    def test_convert_safely_skips_when_already_running(self):
+        """連打時は変換処理を多重起動せず、短い通知音だけで戻ることを確認します。"""
+
+        fake_user32 = SimpleNamespace(MessageBeep=Mock())
+        app = object.__new__(TrayApplication)
+        app._convert_lock = e2m.threading.Lock()
+        app._convert_lock.acquire()
+        try:
+            with (
+                patch("excel_to_markdown.user32", fake_user32),
+                patch("excel_to_markdown.convert_clipboard_or_excel_selection") as convert,
+            ):
+                app._convert_safely()
+        finally:
+            app._convert_lock.release()
+        convert.assert_not_called()
+        fake_user32.MessageBeep.assert_called_once_with(0xFFFFFFFF)
+
+    def test_convert_safely_does_not_beep_for_empty_markdown(self):
+        """変換結果が空の場合は成功音ではなく案内ダイアログを出すことを確認します。"""
+
+        fake_user32 = SimpleNamespace(MessageBeep=Mock(), MessageBoxW=Mock())
+        app = object.__new__(TrayApplication)
+        app._convert_lock = e2m.threading.Lock()
+        app.prefer_excel = False
+        app.hwnd = 100
+        with (
+            patch("excel_to_markdown.user32", fake_user32),
+            patch("excel_to_markdown.convert_clipboard_or_excel_selection", return_value=""),
+        ):
+            app._convert_safely()
+        fake_user32.MessageBeep.assert_not_called()
+        fake_user32.MessageBoxW.assert_called_once()
 
     def test_configure_windows_api_declares_window_and_tray_functions(self):
         """ウィンドウ管理・トレイ関連Win32 APIにもctypes型宣言を付けることを確認します。"""
@@ -253,12 +323,32 @@ class ConversionTests(unittest.TestCase):
         expected = "| A | B |\n| --- | --- |\n| 1 | 2 |\n"
         self.assertEqual(convert_text_to_markdown(source), expected)
 
-    def test_main_rejects_non_windows(self):
-        """Linux/UnixなどWindows以外ではアプリ本体が動作しないことを確認します。"""
+    def test_main_stdin_runs_on_non_windows(self):
+        """Linux/UnixなどWindows以外でも標準入力変換はOS判定で終了しないことを確認します。"""
 
-        with patch("sys.platform", "linux"), patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            self.assertEqual(main(["--stdin"]), 1)
-            self.assertIn("Windows専用", stderr.getvalue())
+        with (
+            patch("sys.platform", "linux"),
+            patch("sys.stdin", io.StringIO("A\tB\n1\t2\n")),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(main(["--stdin"]), 0)
+        self.assertIn("| A | B |", stdout.getvalue())
+
+    def test_prefer_excel_config_defaults_to_clipboard(self):
+        """Excel起動中の別選択範囲を誤変換しないよう、既定値はクリップボード優先にします。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text("[shortcut]\nkey = Ctrl+Alt+M\n", encoding="utf-8")
+            self.assertFalse(load_prefer_excel_config(config_file))
+
+    def test_prefer_excel_config_can_enable_excel_selection(self):
+        """config.iniで明示した場合だけExcel選択範囲を優先できることを確認します。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text("[conversion]\nprefer_excel = true\n", encoding="utf-8")
+            self.assertTrue(load_prefer_excel_config(config_file))
 
 
 if __name__ == "__main__":
