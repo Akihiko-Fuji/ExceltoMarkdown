@@ -46,7 +46,7 @@ class ConversionTests(unittest.TestCase):
         """太字・イタリック・リンクの書式情報がMarkdownへ反映されることを確認します。"""
 
         rows = [[Cell("Title", bold=True), Cell("Site", italic=True, href="https://example.com/a)b")], ["x", "y"]]
-        expected = "| **Title** | *[Site](https://example.com/a%29b)* |\n| --- | --- |\n| x | y |\n"
+        expected = "| **Title** | [*Site*](https://example.com/a%29b) |\n| --- | --- |\n| x | y |\n"
         self.assertEqual(rows_to_markdown(rows), expected)
 
     def test_icon_path_uses_e2m_ico(self):
@@ -85,6 +85,20 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_SHIFT)
         self.assertEqual(hotkey.virtual_key, ord("Z"))
 
+    def test_explicit_shortcut_key_overrides_default_key_with_same_name(self):
+        """DEFAULTにもkeyがある場合でもshortcutセクション直下のkeyを優先します。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text(
+                "[DEFAULT]\nkey = Ctrl+Alt+X\n[shortcut]\nkey = Ctrl+Shift+Y\n",
+                encoding="utf-8",
+            )
+            hotkey = load_hotkey_config(config_file)
+        self.assertEqual(hotkey.label, "Ctrl+Shift+Y")
+        self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_SHIFT)
+        self.assertEqual(hotkey.virtual_key, ord("Y"))
+
     def test_bold_italic_formatting_uses_triple_marker(self):
         """太字とイタリックを併用するセルはGFM互換の一括マーカーで整形します。"""
 
@@ -97,6 +111,13 @@ class ConversionTests(unittest.TestCase):
 
         rows = [[Cell("Report (final)", href="https://example.com/a)b")], ["x"]]
         expected = "| [Report (final)](https://example.com/a%29b) |\n| --- |\n| x |\n"
+        self.assertEqual(rows_to_markdown(rows), expected)
+
+    def test_bold_italic_link_formats_link_text(self):
+        """リンク付き太字イタリックはリンクの表示テキスト側へマーカーを入れます。"""
+
+        rows = [[Cell("Docs", bold=True, italic=True, href="https://example.com/docs")], ["x"]]
+        expected = "| [***Docs***](https://example.com/docs) |\n| --- |\n| x |\n"
         self.assertEqual(rows_to_markdown(rows), expected)
 
     def test_escape_markdown_cell_escapes_parentheses(self):

@@ -14,6 +14,7 @@ import configparser
 import ctypes
 import importlib
 import importlib.util
+import io
 import sys
 import threading
 import traceback
@@ -62,6 +63,56 @@ DEFAULT_HOTKEY = "Ctrl+Alt+M"
 user32 = ctypes.windll.user32 if sys.platform == "win32" else None
 kernel32 = ctypes.windll.kernel32 if sys.platform == "win32" else None
 shell32 = ctypes.windll.shell32 if sys.platform == "win32" else None
+
+
+class POINT(ctypes.Structure):
+    """右クリックメニューを表示するカーソル座標を保持するWin32構造体です。"""
+
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class MSG(ctypes.Structure):
+    """Windowsのメッセージループで受け取るイベント情報の構造体です。"""
+
+    _fields_ = [
+        ("hwnd", wintypes.HWND),
+        ("message", wintypes.UINT),
+        ("wParam", wintypes.WPARAM),
+        ("lParam", wintypes.LPARAM),
+        ("time", wintypes.DWORD),
+        ("pt", POINT),
+    ]
+
+
+class WNDCLASS(ctypes.Structure):
+    """非表示ウィンドウを登録するためのWin32ウィンドウクラス構造体です。"""
+
+    _fields_ = [
+        ("style", wintypes.UINT),
+        ("lpfnWndProc", WINDOW_CALLBACK(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wintypes.HINSTANCE),
+        ("hIcon", wintypes.HICON),
+        ("hCursor", wintypes.HCURSOR),
+        ("hbrBackground", wintypes.HBRUSH),
+        ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR),
+    ]
+
+
+class NOTIFYICONDATA(ctypes.Structure):
+    """タスクトレイアイコンの登録・削除に使う通知領域データ構造体です。"""
+
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", wintypes.UINT),
+        ("uFlags", wintypes.UINT),
+        ("uCallbackMessage", wintypes.UINT),
+        ("hIcon", wintypes.HICON),
+        ("szTip", wintypes.WCHAR * 128),
+    ]
 
 
 def _configure_windows_api() -> None:
@@ -159,7 +210,6 @@ def _configure_windows_api() -> None:
     kernel32.GlobalFree.restype = wintypes.HGLOBAL
 
 
-
 def is_windows() -> bool:
     """このアプリを動作対象にしているWindows環境かどうかを返します。"""
 
@@ -212,55 +262,6 @@ def load_application_icon() -> wintypes.HANDLE:
         raise ctypes.WinError(ctypes.get_last_error())
     return icon
 
-
-class POINT(ctypes.Structure):
-    """右クリックメニューを表示するカーソル座標を保持するWin32構造体です。"""
-
-    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
-
-
-class MSG(ctypes.Structure):
-    """Windowsのメッセージループで受け取るイベント情報の構造体です。"""
-
-    _fields_ = [
-        ("hwnd", wintypes.HWND),
-        ("message", wintypes.UINT),
-        ("wParam", wintypes.WPARAM),
-        ("lParam", wintypes.LPARAM),
-        ("time", wintypes.DWORD),
-        ("pt", POINT),
-    ]
-
-
-class WNDCLASS(ctypes.Structure):
-    """非表示ウィンドウを登録するためのWin32ウィンドウクラス構造体です。"""
-
-    _fields_ = [
-        ("style", wintypes.UINT),
-        ("lpfnWndProc", WINDOW_CALLBACK(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wintypes.HINSTANCE),
-        ("hIcon", wintypes.HICON),
-        ("hCursor", wintypes.HCURSOR),
-        ("hbrBackground", wintypes.HBRUSH),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-    ]
-
-
-class NOTIFYICONDATA(ctypes.Structure):
-    """タスクトレイアイコンの登録・削除に使う通知領域データ構造体です。"""
-
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("hWnd", wintypes.HWND),
-        ("uID", wintypes.UINT),
-        ("uFlags", wintypes.UINT),
-        ("uCallbackMessage", wintypes.UINT),
-        ("hIcon", wintypes.HICON),
-        ("szTip", wintypes.WCHAR * 128),
-    ]
 
 
 _configure_windows_api()
@@ -370,11 +371,21 @@ def _get_explicit_config_option(parser: configparser.ConfigParser, section: str,
 
     if not parser.has_section(section):
         return None
-    normalized_option = parser.optionxform(option)
-    section_values = parser._sections.get(section, {})
-    if normalized_option not in section_values:
+
+    disabled_default_section = "__e2m_disabled_defaults__"
+    while parser.has_section(disabled_default_section) or parser.default_section == disabled_default_section:
+        disabled_default_section = f"_{disabled_default_section}"
+
+    serialized_config = io.StringIO()
+    parser.write(serialized_config)
+    serialized_config.seek(0)
+
+    section_only_parser = configparser.ConfigParser(default_section=disabled_default_section)
+    section_only_parser.optionxform = parser.optionxform
+    section_only_parser.read_file(serialized_config)
+    if not section_only_parser.has_option(section, option):
         return None
-    return parser.get(section, option)
+    return section_only_parser.get(section, option)
 
 
 def load_hotkey_config(path: Path | None = None) -> HotkeyConfig:
@@ -419,9 +430,15 @@ def format_cell(cell: Cell | object) -> str:
     if cell.href and text:
         # リンクテキスト内の丸括弧はMarkdownリンク構文を壊さないため、表示用に元へ戻します。
         link_text = text.replace("\\(", "(").replace("\\)", ")")
+        if cell.bold and cell.italic:
+            link_text = f"***{link_text}***"
+        elif cell.italic:
+            link_text = f"*{link_text}*"
+        elif cell.bold:
+            link_text = f"**{link_text}**"
         # URL内の閉じ括弧はMarkdownリンク構文を壊すため、最低限エンコードします。
         href = str(cell.href).replace(")", "%29")
-        text = f"[{link_text}]({href})"
+        return f"[{link_text}]({href})"
     if cell.bold and cell.italic and text:
         return f"***{text}***"
     if cell.italic and text:
