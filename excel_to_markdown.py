@@ -1,10 +1,10 @@
-"""Excelのクリップボード内容または選択範囲をMarkdown表へ変換します。
+"""Excel由来のTSVテキストやExcel選択範囲をMarkdown表へ変換します。
 
-このモジュールは、Windows Executableとして小さく配布しやすいように、
-基本機能をPython標準ライブラリだけで実装しています。任意の ``pywin32``
-がインストールされている場合のみ、COM経由でExcelのアクティブな選択範囲
-を読み取り、太字・イタリック・ハイパーリンクなどの簡単な書式もMarkdown
-へ反映します。
+標準入力のTSV変換はOSを問わず利用できます。Windowsではクリップボード、
+ホットキー、タスクトレイを使った常駐アプリとしても動作します。任意の
+``pywin32`` がインストールされている場合のみ、COM経由でExcelのアクティブ
+な選択範囲を読み取り、太字・イタリック・ハイパーリンクなどの簡単な書式
+もMarkdownへ反映します。
 """
 
 from __future__ import annotations
@@ -270,6 +270,9 @@ def load_application_icon() -> wintypes.HANDLE:
     return icon
 
 
+_configure_windows_api()
+
+
 @dataclass(frozen=True)
 class HotkeyConfig:
     """WindowsのRegisterHotKeyへ渡すショートカット設定です。"""
@@ -373,19 +376,13 @@ def _get_explicit_config_option(parser: configparser.ConfigParser, section: str,
     """DEFAULTから継承された値ではなく、セクション直下に書かれた値だけを返します。"""
 
     option_norm = parser.optionxform(option)
-    defaults = parser.defaults()
     if section == parser.default_section:
-        return defaults.get(option_norm)
+        return parser.defaults().get(option_norm)
     if not parser.has_section(section):
         return None
 
-    saved_defaults = dict(defaults)
-    defaults.clear()
-    try:
-        option_is_explicit = parser.has_option(section, option)
-    finally:
-        defaults.update(saved_defaults)
-    if not option_is_explicit:
+    section_values = parser._sections.get(section, {})
+    if option_norm not in section_values:
         return None
     return parser.get(section, option)
 
@@ -413,7 +410,11 @@ def load_hotkey_config(path: Path | None = None) -> HotkeyConfig:
 
 
 def _parse_config_bool(value: str) -> bool:
-    """config.iniの真偽値文字列をboolへ変換します。"""
+    """config.iniの真偽値文字列をboolへ変換します。
+
+    標準的な 1/yes/true/on と 0/no/false/off に加え、
+    enabled/disabled も受け付けます。
+    """
 
     normalized = value.strip().lower()
     if normalized in {"1", "yes", "true", "on", "enabled"}:
@@ -532,7 +533,11 @@ def _require_windows() -> None:
 
 
 def open_clipboard_with_retry(retries: int = CLIPBOARD_OPEN_RETRIES, delay: float = CLIPBOARD_OPEN_DELAY_SECONDS) -> None:
-    """他アプリが一瞬クリップボードを掴んでいる場合に備えてOpenClipboardを短く再試行します。"""
+    """他アプリが一瞬クリップボードを掴んでいる場合に備えてOpenClipboardを短く再試行します。
+
+    成功時はクリップボードを開いたまま返すため、呼び出し元は必ず
+    ``user32.CloseClipboard()`` で解放してください。
+    """
 
     _require_windows()
     for _ in range(retries):
@@ -645,6 +650,15 @@ def _excel_selection_to_rows() -> list[list[Cell]]:
     return rows
 
 
+def _log_excel_selection_fallback(error: BaseException) -> None:
+    """Excel選択範囲の取得に失敗してクリップボード変換へ戻る理由をログへ残します。"""
+
+    log_path = app_base_dir() / "excel_to_markdown_error.log"
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        print("Excel選択範囲の取得に失敗したため、クリップボードTSVへフォールバックします。", file=log_file)
+        traceback.print_exception(type(error), error, error.__traceback__, file=log_file)
+
+
 def convert_clipboard_or_excel_selection(prefer_excel: bool = DEFAULT_PREFER_EXCEL) -> str:
     """設定に応じてExcel選択範囲、またはクリップボードTSVをMarkdown化します。"""
 
@@ -655,10 +669,12 @@ def convert_clipboard_or_excel_selection(prefer_excel: bool = DEFAULT_PREFER_EXC
             if markdown:
                 write_clipboard_text(markdown)
                 return markdown
-        except Exception:
+        except ValueError:
+            raise
+        except Exception as error:
             # Excelが起動していない、または選択範囲がRangeではない場合があります。
-            # その場合でも、pywin32不要のプレーンテキスト変換へフォールバックします。
-            pass
+            # その場合でも、理由をログに残してプレーンテキスト変換へフォールバックします。
+            _log_excel_selection_fallback(error)
     markdown = convert_text_to_markdown(read_clipboard_text())
     if markdown:
         write_clipboard_text(markdown)
@@ -852,14 +868,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.stdin:
         sys.stdout.write(convert_text_to_markdown(sys.stdin.read()))
         return 0
+    if not is_windows():
+        print("ExceltoMarkdownはWindows専用です。--stdinのみ非Windowsでも利用できます。", file=sys.stderr)
+        return 1
     if args.once:
         convert_clipboard_or_excel_selection(prefer_excel=load_prefer_excel_config())
         return 0
     TrayApplication().run()
     return 0
-
-
-_configure_windows_api()
 
 
 if __name__ == "__main__":

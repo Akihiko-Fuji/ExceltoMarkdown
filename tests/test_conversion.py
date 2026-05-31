@@ -1,3 +1,4 @@
+import configparser
 import io
 import tempfile
 import unittest
@@ -100,6 +101,16 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_SHIFT)
         self.assertEqual(hotkey.virtual_key, ord("Y"))
 
+    def test_get_explicit_config_option_does_not_mutate_defaults(self):
+        """明示設定の確認でConfigParserのDEFAULT辞書を破壊しないことを確認します。"""
+
+        parser = configparser.ConfigParser()
+        parser.read_string("[DEFAULT]\nkey = Ctrl+Alt+X\n[shortcut]\nname = ignored\n")
+        defaults = parser.defaults()
+        self.assertIsNone(e2m._get_explicit_config_option(parser, "shortcut", "key"))
+        self.assertEqual(defaults, {"key": "Ctrl+Alt+X"})
+        self.assertIs(parser.defaults(), defaults)
+
     def test_explicit_shortcut_key_interpolates_default_value(self):
         """セクション直下のkeyがDEFAULT値を補間している場合も正しく読み込みます。"""
 
@@ -150,6 +161,34 @@ class ConversionTests(unittest.TestCase):
         ):
             self.assertEqual(convert_clipboard_or_excel_selection(prefer_excel=True), "")
         write_clipboard_text.assert_not_called()
+
+    def test_excel_selection_too_large_does_not_fallback_to_clipboard(self):
+        """Excel選択範囲が大きすぎる場合は古いクリップボード内容へフォールバックしません。"""
+
+        with (
+            patch("excel_to_markdown.pywin32_available", return_value=True),
+            patch("excel_to_markdown._excel_selection_to_rows", side_effect=ValueError("too large")),
+            patch("excel_to_markdown.read_clipboard_text") as read_clipboard_text,
+        ):
+            with self.assertRaises(ValueError):
+                convert_clipboard_or_excel_selection(prefer_excel=True)
+        read_clipboard_text.assert_not_called()
+
+    def test_prefer_excel_logs_com_failure_before_clipboard_fallback(self):
+        """Excel COM取得失敗時は理由をログへ残してからクリップボード変換へ戻ります。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch("excel_to_markdown.pywin32_available", return_value=True),
+                patch("excel_to_markdown._excel_selection_to_rows", side_effect=RuntimeError("COM unavailable")),
+                patch("excel_to_markdown.app_base_dir", return_value=Path(directory)),
+                patch("excel_to_markdown.read_clipboard_text", return_value="A\tB\n1\t2\n"),
+                patch("excel_to_markdown.write_clipboard_text"),
+            ):
+                markdown = convert_clipboard_or_excel_selection(prefer_excel=True)
+            log_text = (Path(directory) / "excel_to_markdown_error.log").read_text(encoding="utf-8")
+        self.assertIn("COM unavailable", log_text)
+        self.assertIn("| A | B |", markdown)
 
     def test_read_clipboard_text_raises_when_global_lock_fails(self):
         """クリップボードメモリのロック失敗は空文字列ではなく例外として扱います。"""
@@ -333,6 +372,18 @@ class ConversionTests(unittest.TestCase):
         ):
             self.assertEqual(main(["--stdin"]), 0)
         self.assertIn("| A | B |", stdout.getvalue())
+
+    def test_main_once_on_non_windows_prints_friendly_error(self):
+        """非Windowsの--onceはWin32 API例外ではなく明示メッセージで終了します。"""
+
+        with (
+            patch("sys.platform", "linux"),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            patch("excel_to_markdown.convert_clipboard_or_excel_selection") as convert,
+        ):
+            self.assertEqual(main(["--once"]), 1)
+        convert.assert_not_called()
+        self.assertIn("--stdin", stderr.getvalue())
 
     def test_prefer_excel_config_defaults_to_clipboard(self):
         """Excel起動中の別選択範囲を誤変換しないよう、既定値はクリップボード優先にします。"""

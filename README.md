@@ -55,6 +55,8 @@ key = Ctrl+Alt+M
 prefer_excel = false
 ```
 
+`prefer_excel` の真偽値は `1` / `yes` / `true` / `on` / `enabled` と `0` / `no` / `false` / `off` / `disabled` を指定できます。
+
 指定できる修飾キーは `Ctrl` / `Alt` / `Shift` / `Win` です。通常キーは英数字1文字、`F1`〜`F24`、`Enter`、`Esc`、`Space`、`Tab`、矢印キーなどを指定できます。例: `Ctrl+Shift+M`、`Alt+F12`。 `Ctrl+Shift+V` はWindowsやOfficeで「テキストのみ貼り付け」に使われるため、既定値にはしていません。
 
 ### 1回だけ変換して終了
