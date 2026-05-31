@@ -29,6 +29,9 @@ from typing import Iterable, Sequence
 # WindowsではWINFUNCTYPE、非Windowsのテスト環境ではCFUNCTYPEを使います。
 WINDOW_CALLBACK = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
 LRESULT = getattr(wintypes, "LRESULT", ctypes.c_ssize_t)
+# Python 3.11 の非Windows環境では一部のWin32ハンドル型が未定義のため、
+# 構造体定義をimport時に評価できるよう公開されているHANDLE型へフォールバックします。
+HCURSOR = getattr(wintypes, "HCURSOR", wintypes.HANDLE)
 
 # Win32メッセージ処理とタスクトレイ操作に使う定数です。
 HOTKEY_ID = 0x4D44
@@ -114,7 +117,7 @@ class WNDCLASS(ctypes.Structure):
         ("cbWndExtra", ctypes.c_int),
         ("hInstance", wintypes.HINSTANCE),
         ("hIcon", wintypes.HICON),
-        ("hCursor", wintypes.HCURSOR),
+        ("hCursor", HCURSOR),
         ("hbrBackground", wintypes.HBRUSH),
         ("lpszMenuName", wintypes.LPCWSTR),
         ("lpszClassName", wintypes.LPCWSTR),
