@@ -14,6 +14,7 @@ import configparser
 import ctypes
 import importlib
 import importlib.util
+import io
 import sys
 import threading
 import time
@@ -372,6 +373,31 @@ def parse_hotkey(value: str) -> HotkeyConfig:
     return HotkeyConfig("+".join([*modifier_labels, key_label]), modifiers, virtual_key)
 
 
+def _get_section_own_options(parser: configparser.ConfigParser, section: str) -> set[str]:
+    """ConfigParserの公開APIだけで、指定セクション直下のオプション名を取得します。"""
+
+    buffer = io.StringIO()
+    parser.write(buffer)
+    current_section = None
+    own_options: set[str] = set()
+    for line in buffer.getvalue().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current_section = stripped[1:-1]
+            continue
+        if current_section != section or line[:1].isspace():
+            continue
+
+        delimiters = [index for index in (line.find("="), line.find(":")) if index != -1]
+        if not delimiters:
+            continue
+        option_name = line[: min(delimiters)].strip()
+        own_options.add(parser.optionxform(option_name))
+    return own_options
+
+
 def _get_explicit_config_option(parser: configparser.ConfigParser, section: str, option: str) -> str | None:
     """DEFAULTから継承された値ではなく、セクション直下に書かれた値だけを返します。"""
 
@@ -381,8 +407,8 @@ def _get_explicit_config_option(parser: configparser.ConfigParser, section: str,
     if not parser.has_section(section):
         return None
 
-    section_values = parser._sections.get(section, {})
-    if option_norm not in section_values:
+    section_own_keys = _get_section_own_options(parser, section)
+    if option_norm not in section_own_keys:
         return None
     return parser.get(section, option)
 
@@ -529,7 +555,8 @@ def _require_windows() -> None:
     """Win32 APIが必要な処理をWindows以外で実行しないようにします。"""
 
     if not is_windows():
-        raise RuntimeError("この処理にはWindowsのクリップボード/タスクトレイAPIが必要です。")
+        # 例外はログに残る可能性があるため、開発者向けメッセージとして英語に統一します。
+        raise RuntimeError("Windows clipboard/task tray APIs are required for this operation.")
 
 
 def open_clipboard_with_retry(retries: int = CLIPBOARD_OPEN_RETRIES, delay: float = CLIPBOARD_OPEN_DELAY_SECONDS) -> None:
@@ -650,13 +677,26 @@ def _excel_selection_to_rows() -> list[list[Cell]]:
     return rows
 
 
+def write_error_log(callback) -> Path | None:
+    """エラーログを書き込み、書き込み先に権限がない場合は静かに諦めます。"""
+
+    log_path = app_base_dir() / "excel_to_markdown_error.log"
+    try:
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            callback(log_file)
+    except Exception:
+        return None
+    return log_path
+
+
 def _log_excel_selection_fallback(error: BaseException) -> None:
     """Excel選択範囲の取得に失敗してクリップボード変換へ戻る理由をログへ残します。"""
 
-    log_path = app_base_dir() / "excel_to_markdown_error.log"
-    with open(log_path, "a", encoding="utf-8") as log_file:
+    def write_fallback_reason(log_file) -> None:
         print("Excel選択範囲の取得に失敗したため、クリップボードTSVへフォールバックします。", file=log_file)
         traceback.print_exception(type(error), error, error.__traceback__, file=log_file)
+
+    write_error_log(write_fallback_reason)
 
 
 def convert_clipboard_or_excel_selection(prefer_excel: bool = DEFAULT_PREFER_EXCEL) -> str:
@@ -813,10 +853,12 @@ class TrayApplication:
             else:
                 user32.MessageBoxW(self.hwnd, "変換対象のテキストがありません。", "Excel to Markdown", 0x40)
         except Exception:
-            log_path = app_base_dir() / "excel_to_markdown_error.log"
-            with open(log_path, "a", encoding="utf-8") as log_file:
-                traceback.print_exc(file=log_file)
-            user32.MessageBoxW(self.hwnd, f"変換に失敗しました。\n{log_path}", "Excel to Markdown", 0x10)
+            log_path = write_error_log(lambda log_file: traceback.print_exc(file=log_file))
+            if log_path is None:
+                message = "変換に失敗しました。\nログファイルへ書き込めませんでした。"
+            else:
+                message = f"変換に失敗しました。\n{log_path}"
+            user32.MessageBoxW(self.hwnd, message, "Excel to Markdown", 0x10)
         finally:
             self._convert_lock.release()
 
