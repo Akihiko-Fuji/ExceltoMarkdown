@@ -61,6 +61,20 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_ALT)
         self.assertEqual(hotkey.virtual_key, 0x7B)
 
+    def test_bold_italic_formatting_uses_nested_underscore_italic(self):
+        """太字とイタリックを併用するセルは互換性の高い入れ子形式へ整形します。"""
+
+        rows = [[Cell("Title", bold=True, italic=True)], ["x"]]
+        expected = "| **_Title_** |\n| --- |\n| x |\n"
+        self.assertEqual(rows_to_markdown(rows), expected)
+
+    def test_tsv_to_rows_ignores_multiple_trailing_blank_lines(self):
+        """末尾に連続する改行は余分な空行としてMarkdownへ出力しません。"""
+
+        source = "A\tB\n1\t2\n\n"
+        expected = "| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+        self.assertEqual(convert_text_to_markdown(source), expected)
+
     def test_main_rejects_non_windows(self):
         """Linux/UnixなどWindows以外ではアプリ本体が動作しないことを確認します。"""
 

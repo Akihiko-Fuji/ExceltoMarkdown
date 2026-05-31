@@ -14,7 +14,6 @@ import configparser
 import ctypes
 import importlib
 import importlib.util
-import os
 import sys
 import threading
 import traceback
@@ -258,8 +257,8 @@ _KEY_ALIASES = {
     "right": 0x27,
 }
 
-for _number in range(1, 25):
-    _KEY_ALIASES[f"f{_number}"] = 0x70 + _number - 1
+_FUNCTION_KEY_ALIASES = {f"f{_number}": 0x70 + _number - 1 for _number in range(1, 25)}
+_KEY_ALIASES.update(_FUNCTION_KEY_ALIASES)
 
 
 def _parse_virtual_key(key_name: str) -> tuple[str, int]:
@@ -268,9 +267,10 @@ def _parse_virtual_key(key_name: str) -> tuple[str, int]:
     normalized = key_name.strip().lower()
     if len(normalized) == 1 and normalized.isalnum():
         return normalized.upper(), ord(normalized.upper())
+    if normalized in _FUNCTION_KEY_ALIASES:
+        return f"F{normalized[1:]}", _FUNCTION_KEY_ALIASES[normalized]
     if normalized in _KEY_ALIASES:
-        label = "F" + normalized[1:] if normalized.startswith("f") and normalized[1:].isdigit() else key_name.strip()
-        return label, _KEY_ALIASES[normalized]
+        return key_name.strip(), _KEY_ALIASES[normalized]
     raise ValueError(f"未対応のショートカットキーです: {key_name}")
 
 
@@ -344,7 +344,8 @@ def format_cell(cell: Cell | object) -> str:
         href = str(cell.href).replace(")", "%29")
         text = f"[{text}]({href})"
     if cell.italic and text:
-        text = f"*{text}*"
+        italic_marker = "_" if cell.bold else "*"
+        text = f"{italic_marker}{text}{italic_marker}"
     if cell.bold and text:
         text = f"**{text}**"
     return text
@@ -364,9 +365,8 @@ def tsv_to_rows(text: str) -> list[list[Cell]]:
     """Excelがクリップボードへ置くタブ区切りテキストを行・セルへ分解します。"""
 
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    if text.endswith("\n"):
-        # Excelコピーでは末尾に改行が付くことが多いため、空行として扱わないよう除去します。
-        text = text[:-1]
+    # Excelコピーでは末尾に改行が付くことが多いため、末尾の連続空行として扱わないよう除去します。
+    text = text.rstrip("\n")
     if not text:
         return []
     return [[Cell(value) for value in line.split("\t")] for line in text.split("\n")]
@@ -428,8 +428,8 @@ def write_clipboard_text(text: str) -> None:
     """UnicodeテキストをWindowsクリップボードへ書き込みます。"""
 
     _require_windows()
-    data = text + "\0"
-    byte_count = len(data.encode("utf-16-le"))
+    encoded = (text + "\0").encode("utf-16-le")
+    byte_count = len(encoded)
     handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, byte_count)
     if not handle:
         raise MemoryError("Could not allocate clipboard memory.")
@@ -438,7 +438,7 @@ def write_clipboard_text(text: str) -> None:
         kernel32.GlobalFree(handle)
         raise MemoryError("Could not lock clipboard memory.")
     try:
-        ctypes.memmove(pointer, data.encode("utf-16-le"), byte_count)
+        ctypes.memmove(pointer, encoded, byte_count)
     finally:
         kernel32.GlobalUnlock(handle)
     if not user32.OpenClipboard(None):
@@ -446,12 +446,15 @@ def write_clipboard_text(text: str) -> None:
         raise OSError("Could not open clipboard.")
     try:
         user32.EmptyClipboard()
-        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
-            kernel32.GlobalFree(handle)
+        result = user32.SetClipboardData(CF_UNICODETEXT, handle)
+        if result:
+            handle = None
+        else:
             raise OSError("Could not set clipboard data.")
-        handle = None
     finally:
         user32.CloseClipboard()
+        if handle is not None:
+            kernel32.GlobalFree(handle)
 
 
 def pywin32_available() -> bool:
@@ -480,7 +483,14 @@ def _excel_selection_to_rows() -> list[list[Cell]]:
             href = None
             if int(com_cell.Hyperlinks.Count) > 0:
                 link = com_cell.Hyperlinks(1)
-                href = link.Address or link.SubAddress
+                address = link.Address or ""
+                sub_address = link.SubAddress or ""
+                if address and sub_address:
+                    href = f"{address}#{sub_address}"
+                elif address:
+                    href = address
+                elif sub_address:
+                    href = f"#{sub_address}"
             row.append(
                 Cell(
                     value=value,
@@ -523,6 +533,7 @@ class TrayApplication:
         self.hinstance = kernel32.GetModuleHandleW(None)
         self.class_name = "ExcelToMarkdownTrayWindow"
         self.hwnd = None
+        self._icon = load_application_icon()
         self._wndproc = WINDOW_CALLBACK(
             LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
         )(self._window_proc)
@@ -547,7 +558,7 @@ class TrayApplication:
         wc.lpfnWndProc = self._wndproc
         wc.hInstance = self.hinstance
         wc.lpszClassName = self.class_name
-        wc.hIcon = load_application_icon()
+        wc.hIcon = self._icon
         atom = user32.RegisterClassW(ctypes.byref(wc))
         if not atom and ctypes.get_last_error() != 1410:
             raise ctypes.WinError(ctypes.get_last_error())
@@ -581,7 +592,7 @@ class TrayApplication:
         nid.uID = 1
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP
         nid.uCallbackMessage = WM_TRAYICON
-        nid.hIcon = load_application_icon()
+        nid.hIcon = self._icon
         nid.szTip = f"Excel to Markdown ({self.hotkey.label})"
         return nid
 
@@ -629,7 +640,7 @@ class TrayApplication:
             convert_clipboard_or_excel_selection(prefer_excel=True)
             user32.MessageBeep(0xFFFFFFFF)
         except Exception:
-            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "excel_to_markdown_error.log")
+            log_path = app_base_dir() / "excel_to_markdown_error.log"
             with open(log_path, "a", encoding="utf-8") as log_file:
                 traceback.print_exc(file=log_file)
             user32.MessageBoxW(self.hwnd, f"変換に失敗しました。\n{log_path}", "Excel to Markdown", 0x10)
@@ -661,7 +672,7 @@ class TrayApplication:
             self._remove_tray_icon()
             user32.PostQuitMessage(0)
             return 0
-        return user32.DefWindowProcW(hwnd, message, wparam, lparam)
+        return int(user32.DefWindowProcW(hwnd, message, wparam, lparam))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
