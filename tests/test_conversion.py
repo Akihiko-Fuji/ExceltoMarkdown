@@ -132,6 +132,18 @@ class ConversionTests(unittest.TestCase):
         html = '<span style="font-style: italic;">斜体</span>'
         self.assertEqual(convert_html_fragment_to_markdown(html), "*斜体*\n")
 
+    def test_html_void_tag_does_not_break_parent_style_stack(self):
+        """imgなどのvoid要素は親要素のstyleスタックを崩さないことを確認します。"""
+
+        html = '<span style="font-weight: bold;">a<img src="x">b</span>'
+        self.assertEqual(convert_html_fragment_to_markdown(html), "**ab**\n")
+
+    def test_html_self_closing_void_tag_does_not_pop_parent_style_stack(self):
+        """自己終了形式のvoid要素でも親要素のstyleスタックを保持します。"""
+
+        html = '<span style="font-weight: bold;">a<img src="x" />b</span>'
+        self.assertEqual(convert_html_fragment_to_markdown(html), "**ab**\n")
+
     def test_html_nested_list_indentation_is_preserved(self):
         """ネストしたul/liの行頭インデントをmarkdown整形で消さないことを確認します。"""
 
