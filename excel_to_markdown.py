@@ -1,0 +1,564 @@
+"""Excelのクリップボード内容または選択範囲をMarkdown表へ変換します。
+
+このモジュールは、Windows Executableとして小さく配布しやすいように、
+基本機能をPython標準ライブラリだけで実装しています。任意の ``pywin32``
+がインストールされている場合のみ、COM経由でExcelのアクティブな選択範囲
+を読み取り、太字・イタリック・ハイパーリンクなどの簡単な書式もMarkdown
+へ反映します。
+"""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import importlib
+import importlib.util
+import os
+import sys
+import threading
+import traceback
+from pathlib import Path
+from dataclasses import dataclass
+from ctypes import wintypes
+from typing import Iterable, Sequence
+
+# WindowsではWINFUNCTYPE、非Windowsのテスト環境ではCFUNCTYPEを使います。
+WINDOW_CALLBACK = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+LRESULT = getattr(wintypes, "LRESULT", ctypes.c_ssize_t)
+
+# Win32メッセージ処理とタスクトレイ操作に使う定数です。
+HOTKEY_ID = 0x4D44
+WM_APP = 0x8000
+WM_TRAYICON = WM_APP + 1
+WM_COMMAND = 0x0111
+WM_DESTROY = 0x0002
+WM_HOTKEY = 0x0312
+WM_RBUTTONUP = 0x0205
+WM_LBUTTONDBLCLK = 0x0203
+NIM_ADD = 0x00000000
+NIM_DELETE = 0x00000002
+NIM_MODIFY = 0x00000001
+NIF_MESSAGE = 0x00000001
+NIF_ICON = 0x00000002
+NIF_TIP = 0x00000004
+TPM_RIGHTBUTTON = 0x0002
+TPM_RETURNCMD = 0x0100
+IMAGE_ICON = 1
+LR_LOADFROMFILE = 0x00000010
+LR_DEFAULTSIZE = 0x00000040
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+
+MENU_CONVERT = 1001
+MENU_EXIT = 1002
+APP_ICON_FILENAME = "E2M.ico"
+
+# 非Windows環境でも変換ロジックの単体テストを実行できるよう、DLL参照を遅延させます。
+user32 = ctypes.windll.user32 if sys.platform == "win32" else None
+kernel32 = ctypes.windll.kernel32 if sys.platform == "win32" else None
+shell32 = ctypes.windll.shell32 if sys.platform == "win32" else None
+
+
+def _configure_windows_api() -> None:
+    """Win32 API呼び出しの引数型・戻り値型を明示して安全に扱います。"""
+
+    if sys.platform != "win32":
+        return
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.LoadImageW.argtypes = [
+        wintypes.HINSTANCE,
+        wintypes.LPCWSTR,
+        wintypes.UINT,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    user32.LoadImageW.restype = wintypes.HANDLE
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = wintypes.LPVOID
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
+
+_configure_windows_api()
+
+
+def is_windows() -> bool:
+    """このアプリを動作対象にしているWindows環境かどうかを返します。"""
+
+    return sys.platform == "win32"
+
+
+def resource_path(filename: str) -> Path:
+    """通常実行時とPyInstaller実行時の両方で同梱リソースのパスを解決します。"""
+
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base_dir / filename
+
+
+def icon_path() -> Path:
+    """タスクトレイと実行ファイルで使うE2M.icoのパスを返します。"""
+
+    return resource_path(APP_ICON_FILENAME)
+
+
+def load_application_icon():
+    """E2M.icoをWin32アイコンとして読み込みます。"""
+
+    _require_windows()
+    path = icon_path()
+    if not path.exists():
+        raise FileNotFoundError(f"アイコンファイルが見つかりません: {path}")
+    icon = user32.LoadImageW(
+        None,
+        str(path),
+        IMAGE_ICON,
+        0,
+        0,
+        LR_LOADFROMFILE | LR_DEFAULTSIZE,
+    )
+    if not icon:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return icon
+
+
+class POINT(ctypes.Structure):
+    """右クリックメニューを表示するカーソル座標を保持するWin32構造体です。"""
+
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class MSG(ctypes.Structure):
+    """Windowsのメッセージループで受け取るイベント情報の構造体です。"""
+
+    _fields_ = [
+        ("hwnd", wintypes.HWND),
+        ("message", wintypes.UINT),
+        ("wParam", wintypes.WPARAM),
+        ("lParam", wintypes.LPARAM),
+        ("time", wintypes.DWORD),
+        ("pt", POINT),
+    ]
+
+
+class WNDCLASS(ctypes.Structure):
+    """非表示ウィンドウを登録するためのWin32ウィンドウクラス構造体です。"""
+
+    _fields_ = [
+        ("style", wintypes.UINT),
+        ("lpfnWndProc", WINDOW_CALLBACK(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wintypes.HINSTANCE),
+        ("hIcon", wintypes.HICON),
+        ("hCursor", wintypes.HCURSOR),
+        ("hbrBackground", wintypes.HBRUSH),
+        ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR),
+    ]
+
+
+class NOTIFYICONDATA(ctypes.Structure):
+    """タスクトレイアイコンの登録・削除に使う通知領域データ構造体です。"""
+
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", wintypes.UINT),
+        ("uFlags", wintypes.UINT),
+        ("uCallbackMessage", wintypes.UINT),
+        ("hIcon", wintypes.HICON),
+        ("szTip", wintypes.WCHAR * 128),
+    ]
+
+
+@dataclass(frozen=True)
+class Cell:
+    """セルの値とMarkdownへ反映したい簡易書式情報を保持します。"""
+
+    value: object = ""
+    bold: bool = False
+    italic: bool = False
+    href: str | None = None
+
+
+def escape_markdown_cell(value: object) -> str:
+    """Markdown表の列区切りを壊す文字をセル内で安全にエスケープします。"""
+
+    text = "" if value is None else str(value)
+    # セル内改行はMarkdown表の行区切りと衝突するため、HTMLの改行タグへ寄せます。
+    text = text.replace("\r\n", "<br>").replace("\n", "<br>").replace("\r", "<br>")
+    text = text.replace("\\", "\\\\")
+    text = text.replace("|", "\\|")
+    text = text.replace("[", "\\[").replace("]", "\\]")
+    return text.strip()
+
+
+def format_cell(cell: Cell | object) -> str:
+    """セル値にリンク・イタリック・太字を適用したMarkdown文字列を返します。"""
+
+    if not isinstance(cell, Cell):
+        cell = Cell(cell)
+    text = escape_markdown_cell(cell.value)
+    if cell.href and text:
+        # URL内の閉じ括弧はMarkdownリンク構文を壊すため、最低限エンコードします。
+        href = str(cell.href).replace(")", "%29")
+        text = f"[{text}]({href})"
+    if cell.italic and text:
+        text = f"*{text}*"
+    if cell.bold and text:
+        text = f"**{text}**"
+    return text
+
+
+def normalize_rows(rows: Iterable[Sequence[Cell | object]]) -> list[list[Cell | object]]:
+    """行ごとの列数をそろえ、Markdown表として崩れない矩形データにします。"""
+
+    normalized = [list(row) for row in rows]
+    if not normalized:
+        return []
+    width = max(len(row) for row in normalized)
+    return [row + [Cell()] * (width - len(row)) for row in normalized]
+
+
+def tsv_to_rows(text: str) -> list[list[Cell]]:
+    """Excelがクリップボードへ置くタブ区切りテキストを行・セルへ分解します。"""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if text.endswith("\n"):
+        # Excelコピーでは末尾に改行が付くことが多いため、空行として扱わないよう除去します。
+        text = text[:-1]
+    if not text:
+        return []
+    return [[Cell(value) for value in line.split("\t")] for line in text.split("\n")]
+
+
+def rows_to_markdown(rows: Iterable[Sequence[Cell | object]]) -> str:
+    """行データをGitHub Flavored Markdown互換の表へ変換します。"""
+
+    table = normalize_rows(rows)
+    if not table:
+        return ""
+    formatted = [[format_cell(cell) for cell in row] for row in table]
+    # Markdown表ではヘッダー直下に区切り行が必須です。
+    width = len(formatted[0])
+    separator = ["---"] * width
+    lines = [
+        "| " + " | ".join(formatted[0]) + " |",
+        "| " + " | ".join(separator) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in formatted[1:])
+    return "\n".join(lines) + "\n"
+
+
+def convert_text_to_markdown(text: str) -> str:
+    """Excel由来のTSVテキストをMarkdown表へ変換します。"""
+
+    return rows_to_markdown(tsv_to_rows(text))
+
+
+def _require_windows() -> None:
+    """Windows専用処理を誤ってLinux/Unix/macOSで実行しないようにします。"""
+
+    if not is_windows():
+        raise RuntimeError("このアプリケーションはWindows専用です。Linux/Unix/macOSでは動作しません。")
+
+
+def read_clipboard_text() -> str:
+    """WindowsクリップボードからUnicodeテキストを読み取ります。"""
+
+    _require_windows()
+    if not user32.OpenClipboard(None):
+        raise OSError("Could not open clipboard.")
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return ""
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            return ""
+        try:
+            return ctypes.wstring_at(pointer)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def write_clipboard_text(text: str) -> None:
+    """UnicodeテキストをWindowsクリップボードへ書き込みます。"""
+
+    _require_windows()
+    data = text + "\0"
+    byte_count = len(data.encode("utf-16-le"))
+    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, byte_count)
+    if not handle:
+        raise MemoryError("Could not allocate clipboard memory.")
+    pointer = kernel32.GlobalLock(handle)
+    if not pointer:
+        kernel32.GlobalFree(handle)
+        raise MemoryError("Could not lock clipboard memory.")
+    try:
+        ctypes.memmove(pointer, data.encode("utf-16-le"), byte_count)
+    finally:
+        kernel32.GlobalUnlock(handle)
+    if not user32.OpenClipboard(None):
+        kernel32.GlobalFree(handle)
+        raise OSError("Could not open clipboard.")
+    try:
+        user32.EmptyClipboard()
+        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+            kernel32.GlobalFree(handle)
+            raise OSError("Could not set clipboard data.")
+        handle = None
+    finally:
+        user32.CloseClipboard()
+
+
+def pywin32_available() -> bool:
+    """任意機能であるExcel COM連携（pywin32）が利用可能かを返します。"""
+
+    return (
+        importlib.util.find_spec("win32com") is not None
+        and importlib.util.find_spec("win32com.client") is not None
+    )
+
+
+def _excel_selection_to_rows() -> list[list[Cell]]:
+    """pywin32経由でExcelの選択範囲を読み取り、簡易書式もCellへ格納します。"""
+
+    win32com_client = importlib.import_module("win32com.client")
+    excel = win32com_client.GetActiveObject("Excel.Application")
+    selection = excel.Selection
+    row_count = int(selection.Rows.Count)
+    col_count = int(selection.Columns.Count)
+    rows: list[list[Cell]] = []
+    for row_index in range(1, row_count + 1):
+        row: list[Cell] = []
+        for col_index in range(1, col_count + 1):
+            com_cell = selection.Cells(row_index, col_index)
+            value = com_cell.Text
+            href = None
+            if int(com_cell.Hyperlinks.Count) > 0:
+                link = com_cell.Hyperlinks(1)
+                href = link.Address or link.SubAddress
+            row.append(
+                Cell(
+                    value=value,
+                    bold=bool(com_cell.Font.Bold),
+                    italic=bool(com_cell.Font.Italic),
+                    href=href,
+                )
+            )
+        rows.append(row)
+    return rows
+
+
+def convert_clipboard_or_excel_selection(prefer_excel: bool = True) -> str:
+    """可能ならExcel選択範囲を、失敗時はクリップボードTSVをMarkdown化します。"""
+
+    if prefer_excel and pywin32_available():
+        # pywin32があれば、クリップボードのプレーンテキストより先にExcel本体の選択範囲を試します。
+        try:
+            markdown = rows_to_markdown(_excel_selection_to_rows())
+            if markdown:
+                write_clipboard_text(markdown)
+                return markdown
+        except Exception:
+            # Excelが起動していない、または選択範囲がRangeではない場合があります。
+            # その場合でも、pywin32不要のプレーンテキスト変換へフォールバックします。
+            pass
+    markdown = convert_text_to_markdown(read_clipboard_text())
+    write_clipboard_text(markdown)
+    return markdown
+
+
+class TrayApplication:
+    """ctypesだけで実装した小さなWindows通知領域アプリです。"""
+
+    def __init__(self) -> None:
+        """非表示ウィンドウとメッセージ処理コールバックの準備を行います。"""
+
+        _require_windows()
+        self.hinstance = kernel32.GetModuleHandleW(None)
+        self.class_name = "ExcelToMarkdownTrayWindow"
+        self.hwnd = None
+        self._wndproc = WINDOW_CALLBACK(
+            LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+        )(self._window_proc)
+
+    def run(self) -> None:
+        """タスクトレイアイコンとホットキーを登録し、メッセージループを開始します。"""
+
+        self._register_window_class()
+        self._create_window()
+        self._add_tray_icon()
+        user32.RegisterHotKey(self.hwnd, HOTKEY_ID, MOD_CONTROL | MOD_ALT, ord("M"))
+        msg = MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+    def _register_window_class(self) -> None:
+        """ホットキーやトレイ通知を受けるための非表示ウィンドウクラスを登録します。"""
+
+        wc = WNDCLASS()
+        wc.lpfnWndProc = self._wndproc
+        wc.hInstance = self.hinstance
+        wc.lpszClassName = self.class_name
+        wc.hIcon = load_application_icon()
+        atom = user32.RegisterClassW(ctypes.byref(wc))
+        if not atom and ctypes.get_last_error() != 1410:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def _create_window(self) -> None:
+        """画面には表示しないメッセージ受信用ウィンドウを作成します。"""
+
+        self.hwnd = user32.CreateWindowExW(
+            0,
+            self.class_name,
+            "Excel to Markdown",
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            self.hinstance,
+            None,
+        )
+        if not self.hwnd:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def _notify_data(self) -> NOTIFYICONDATA:
+        """Shell_NotifyIconWに渡す通知領域アイコン情報を組み立てます。"""
+
+        nid = NOTIFYICONDATA()
+        nid.cbSize = ctypes.sizeof(NOTIFYICONDATA)
+        nid.hWnd = self.hwnd
+        nid.uID = 1
+        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP
+        nid.uCallbackMessage = WM_TRAYICON
+        nid.hIcon = load_application_icon()
+        nid.szTip = "Excel to Markdown (Ctrl+Alt+M)"
+        return nid
+
+    def _add_tray_icon(self) -> None:
+        """タスクトレイへアイコンを追加します。"""
+
+        nid = self._notify_data()
+        if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+
+    def _remove_tray_icon(self) -> None:
+        """アプリ終了時にタスクトレイアイコンを削除します。"""
+
+        nid = self._notify_data()
+        shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+
+    def _show_menu(self) -> None:
+        """タスクトレイアイコンの右クリックメニューを表示します。"""
+
+        menu = user32.CreatePopupMenu()
+        user32.AppendMenuW(menu, 0, MENU_CONVERT, "Markdownに変換 (&M)")
+        user32.AppendMenuW(menu, 0, MENU_EXIT, "終了 (&X)")
+        point = POINT()
+        user32.GetCursorPos(ctypes.byref(point))
+        user32.SetForegroundWindow(self.hwnd)
+        command = user32.TrackPopupMenu(
+            menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, point.x, point.y, 0, self.hwnd, None
+        )
+        user32.DestroyMenu(menu)
+        if command == MENU_CONVERT:
+            self._convert_async()
+        elif command == MENU_EXIT:
+            user32.DestroyWindow(self.hwnd)
+
+    def _convert_async(self) -> None:
+        """UIのメッセージループを止めないよう、変換処理を別スレッドで実行します。"""
+
+        threading.Thread(target=self._convert_safely, daemon=True).start()
+
+    def _convert_safely(self) -> None:
+        """例外をログへ残しつつ、クリップボード内容をMarkdownへ変換します。"""
+
+        try:
+            convert_clipboard_or_excel_selection(prefer_excel=True)
+            user32.MessageBeep(0xFFFFFFFF)
+        except Exception:
+            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "excel_to_markdown_error.log")
+            with open(log_path, "a", encoding="utf-8") as log_file:
+                traceback.print_exc(file=log_file)
+            user32.MessageBoxW(self.hwnd, f"変換に失敗しました。\n{log_path}", "Excel to Markdown", 0x10)
+
+    def _window_proc(self, hwnd, message, wparam, lparam):
+        """トレイ操作、メニュー選択、ホットキー、終了通知を処理します。"""
+
+        # トレイアイコンの右クリックはメニュー表示、ダブルクリックは即時変換です。
+        if message == WM_TRAYICON and lparam in (WM_RBUTTONUP, WM_LBUTTONDBLCLK):
+            if lparam == WM_LBUTTONDBLCLK:
+                self._convert_async()
+            else:
+                self._show_menu()
+            return 0
+        if message == WM_COMMAND:
+            command = wparam & 0xFFFF
+            if command == MENU_CONVERT:
+                self._convert_async()
+                return 0
+            if command == MENU_EXIT:
+                user32.DestroyWindow(hwnd)
+                return 0
+        # 既定ホットキー（Ctrl+Alt+M）で変換を実行します。
+        if message == WM_HOTKEY and wparam == HOTKEY_ID:
+            self._convert_async()
+            return 0
+        if message == WM_DESTROY:
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID)
+            self._remove_tray_icon()
+            user32.PostQuitMessage(0)
+            return 0
+        return user32.DefWindowProcW(hwnd, message, wparam, lparam)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI引数を解釈し、標準入力・1回変換・常駐起動の各モードを実行します。"""
+
+    if not is_windows():
+        print("ExceltoMarkdownはWindows専用です。Linux/Unix/macOSでは動作しません。", file=sys.stderr)
+        return 1
+
+    parser = argparse.ArgumentParser(description="Convert Excel TSV clipboard text to Markdown.")
+    parser.add_argument("--stdin", action="store_true", help="read TSV from stdin and write Markdown to stdout")
+    parser.add_argument("--once", action="store_true", help="convert clipboard once and exit")
+    args = parser.parse_args(argv)
+
+    if args.stdin:
+        sys.stdout.write(convert_text_to_markdown(sys.stdin.read()))
+        return 0
+    if args.once:
+        convert_clipboard_or_excel_selection(prefer_excel=True)
+        return 0
+    TrayApplication().run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
