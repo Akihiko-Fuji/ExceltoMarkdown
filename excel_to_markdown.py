@@ -88,6 +88,67 @@ def _configure_windows_api() -> None:
         wintypes.UINT,
     ]
     user32.LoadImageW.restype = wintypes.HANDLE
+    user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASS)]
+    user32.RegisterClassW.restype = wintypes.ATOM
+    user32.CreateWindowExW.argtypes = [
+        wintypes.DWORD,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HWND,
+        wintypes.HMENU,
+        wintypes.HINSTANCE,
+        wintypes.LPVOID,
+    ]
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.DefWindowProcW.restype = LRESULT
+    user32.DestroyWindow.argtypes = [wintypes.HWND]
+    user32.DestroyWindow.restype = wintypes.BOOL
+    user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+    user32.RegisterHotKey.restype = wintypes.BOOL
+    user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.UnregisterHotKey.restype = wintypes.BOOL
+    user32.GetMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+    user32.GetMessageW.restype = wintypes.BOOL
+    user32.TranslateMessage.argtypes = [ctypes.POINTER(MSG)]
+    user32.TranslateMessage.restype = wintypes.BOOL
+    user32.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
+    user32.DispatchMessageW.restype = LRESULT
+    user32.PostQuitMessage.argtypes = [ctypes.c_int]
+    user32.PostQuitMessage.restype = None
+    user32.CreatePopupMenu.argtypes = []
+    user32.CreatePopupMenu.restype = wintypes.HMENU
+    user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, wintypes.WPARAM, wintypes.LPCWSTR]
+    user32.AppendMenuW.restype = wintypes.BOOL
+    user32.TrackPopupMenu.argtypes = [
+        wintypes.HMENU,
+        wintypes.UINT,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HWND,
+        wintypes.LPVOID,
+    ]
+    user32.TrackPopupMenu.restype = wintypes.UINT
+    user32.DestroyMenu.argtypes = [wintypes.HMENU]
+    user32.DestroyMenu.restype = wintypes.BOOL
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+    user32.GetCursorPos.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.MessageBeep.argtypes = [wintypes.UINT]
+    user32.MessageBeep.restype = wintypes.BOOL
+    user32.MessageBoxW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
+    user32.MessageBoxW.restype = ctypes.c_int
+    shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATA)]
+    shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
     kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
     kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
     kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
@@ -97,8 +158,6 @@ def _configure_windows_api() -> None:
     kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
     kernel32.GlobalFree.restype = wintypes.HGLOBAL
 
-
-_configure_windows_api()
 
 
 def is_windows() -> bool:
@@ -134,7 +193,7 @@ def config_path() -> Path:
     return app_base_dir() / CONFIG_FILENAME
 
 
-def load_application_icon():
+def load_application_icon() -> wintypes.HANDLE:
     """e2m_ico.icoをWin32アイコンとして読み込みます。"""
 
     _require_windows()
@@ -204,6 +263,9 @@ class NOTIFYICONDATA(ctypes.Structure):
     ]
 
 
+_configure_windows_api()
+
+
 @dataclass(frozen=True)
 class HotkeyConfig:
     """WindowsのRegisterHotKeyへ渡すショートカット設定です。"""
@@ -264,7 +326,8 @@ def _parse_virtual_key(key_name: str) -> tuple[str, int]:
     """設定文字列のキー名をWin32仮想キーコードへ変換します。"""
 
     normalized = key_name.strip().lower()
-    if len(normalized) == 1 and normalized.isalnum():
+    if len(normalized) == 1 and normalized.isascii() and normalized.isalnum():
+        # Win32の仮想キーコードとASCII英数字のコード値が一致する範囲だけをord()で扱います。
         return normalized.upper(), ord(normalized.upper())
     if normalized in _FUNCTION_KEY_ALIASES:
         return f"F{normalized[1:]}", _FUNCTION_KEY_ALIASES[normalized]
@@ -302,6 +365,18 @@ def parse_hotkey(value: str) -> HotkeyConfig:
     return HotkeyConfig("+".join([*modifier_labels, key_label]), modifiers, virtual_key)
 
 
+def _get_explicit_config_option(parser: configparser.ConfigParser, section: str, option: str) -> str | None:
+    """DEFAULTから継承された値ではなく、セクション直下に書かれた値だけを返します。"""
+
+    if not parser.has_section(section):
+        return None
+    normalized_option = parser.optionxform(option)
+    section_values = parser._sections.get(section, {})
+    if normalized_option not in section_values:
+        return None
+    return parser.get(section, option)
+
+
 def load_hotkey_config(path: Path | None = None) -> HotkeyConfig:
     """config.iniからショートカットキー設定を読み込みます。"""
 
@@ -311,12 +386,14 @@ def load_hotkey_config(path: Path | None = None) -> HotkeyConfig:
         parser.read(config_file, encoding="utf-8")
 
     value = DEFAULT_HOTKEY
-    if parser.has_option("shortcut", "key"):
-        value = parser.get("shortcut", "key")
-    elif parser.has_option("hotkey", "key"):
-        value = parser.get("hotkey", "key")
-    elif parser.has_option("DEFAULT", "shortcut"):
-        value = parser.get("DEFAULT", "shortcut")
+    explicit_shortcut_key = _get_explicit_config_option(parser, "shortcut", "key")
+    explicit_hotkey_key = _get_explicit_config_option(parser, "hotkey", "key")
+    if explicit_shortcut_key is not None:
+        value = explicit_shortcut_key
+    elif explicit_hotkey_key is not None:
+        value = explicit_hotkey_key
+    elif parser.optionxform("shortcut") in parser.defaults():
+        value = parser.get(parser.default_section, "shortcut")
     return parse_hotkey(value)
 
 
@@ -340,9 +417,11 @@ def format_cell(cell: Cell | object) -> str:
         cell = Cell(cell)
     text = escape_markdown_cell(cell.value)
     if cell.href and text:
+        # リンクテキスト内の丸括弧はMarkdownリンク構文を壊さないため、表示用に元へ戻します。
+        link_text = text.replace("\\(", "(").replace("\\)", ")")
         # URL内の閉じ括弧はMarkdownリンク構文を壊すため、最低限エンコードします。
         href = str(cell.href).replace(")", "%29")
-        text = f"[{text}]({href})"
+        text = f"[{link_text}]({href})"
     if cell.bold and cell.italic and text:
         return f"***{text}***"
     if cell.italic and text:
@@ -648,7 +727,13 @@ class TrayApplication:
                 traceback.print_exc(file=log_file)
             user32.MessageBoxW(self.hwnd, f"変換に失敗しました。\n{log_path}", "Excel to Markdown", 0x10)
 
-    def _window_proc(self, hwnd, message, wparam, lparam):
+    def _window_proc(
+        self,
+        hwnd: wintypes.HWND,
+        message: wintypes.UINT,
+        wparam: wintypes.WPARAM,
+        lparam: wintypes.LPARAM,
+    ) -> int:
         """トレイ操作、メニュー選択、ホットキー、終了通知を処理します。"""
 
         # トレイアイコンの右クリックはメニュー表示、ダブルクリックは即時変換です。
