@@ -96,6 +96,7 @@ python excel_to_markdown.py --once
 ```
 
 `--once` はWindowsのクリップボード（および設定に応じてExcel選択範囲）を1回だけ変換して終了します。Windows APIを使うため、Linux/Unix/macOSでは利用できません。
+ショートカットファイルを作成して利用するイメージです。
 
 ### 標準入力で変換を確認（OSを問わず利用可）
 
