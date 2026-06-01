@@ -59,6 +59,22 @@ MOD_WIN = 0x0008
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 HTML_CLIPBOARD_FORMAT_NAME = "HTML Format"
+HTML_VOID_TAGS = {
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
+}
 
 MENU_CONVERT_TABLE = 1001
 MENU_CONVERT_RICH_TEXT = 1002
@@ -627,6 +643,8 @@ class _RichHtmlToMarkdownParser(HTMLParser):
         if tag == "br":
             self._ensure_line_break()
             return
+        if tag in HTML_VOID_TAGS:
+            return
         if tag in {"p", "div"}:
             self._ensure_paragraph_break()
         elif tag in {"ul", "ol"}:
@@ -658,6 +676,8 @@ class _RichHtmlToMarkdownParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if tag in HTML_VOID_TAGS:
+            return
         style_markers = self._style_marker_stack.pop() if self._style_marker_stack else []
         self._parts.extend(reversed(style_markers))
         if tag in {"strong", "b"}:
@@ -677,8 +697,11 @@ class _RichHtmlToMarkdownParser(HTMLParser):
             self._ensure_paragraph_break()
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() == "br":
+        tag = tag.lower()
+        if tag == "br":
             self._ensure_line_break()
+        elif tag in HTML_VOID_TAGS:
+            self.handle_starttag(tag, attrs)
         else:
             self.handle_starttag(tag, attrs)
             self.handle_endtag(tag)
