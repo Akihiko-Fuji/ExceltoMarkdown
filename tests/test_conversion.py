@@ -555,6 +555,7 @@ class ConversionTests(unittest.TestCase):
         app._convert_lock = e2m.threading.Lock()
         app.prefer_excel = False
         app.default_mode = "table"
+        app.language = "ja"
         app.hwnd = 100
         with (
             patch("excel_to_markdown.user32", fake_user32),
@@ -599,6 +600,7 @@ class ConversionTests(unittest.TestCase):
         ]
         kernel32_names = [
             "GetModuleHandleW",
+            "GetUserDefaultUILanguage",
             "GlobalAlloc",
             "GlobalLock",
             "GlobalUnlock",
@@ -662,6 +664,80 @@ class ConversionTests(unittest.TestCase):
             self.assertEqual(main(["--once"]), 1)
         convert.assert_not_called()
         self.assertIn("--stdin", stderr.getvalue())
+
+
+    def test_ui_language_config_auto_uses_os_detection(self):
+        """language = autoではOS言語判定結果を使います。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text("[ui]\nlanguage = auto\n", encoding="utf-8")
+            with patch("excel_to_markdown.detect_ui_language", return_value="ja") as detect:
+                self.assertEqual(e2m.load_ui_language_config(config_file), "ja")
+        detect.assert_called_once_with()
+
+    def test_ui_language_config_can_select_japanese(self):
+        """language = jaではOS判定より日本語設定を優先します。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text("[ui]\nlanguage = ja\n", encoding="utf-8")
+            with patch("excel_to_markdown.detect_ui_language", return_value="en") as detect:
+                self.assertEqual(e2m.load_ui_language_config(config_file), "ja")
+        detect.assert_not_called()
+
+    def test_ui_language_config_can_select_english(self):
+        """language = enではOS判定より英語設定を優先します。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text("[ui]\nlanguage = en\n", encoding="utf-8")
+            with patch("excel_to_markdown.detect_ui_language", return_value="ja") as detect:
+                self.assertEqual(e2m.load_ui_language_config(config_file), "en")
+        detect.assert_not_called()
+
+    def test_ui_language_config_rejects_invalid_language(self):
+        """不正なUI言語設定はValueErrorにします。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text("[ui]\nlanguage = fr\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                e2m.load_ui_language_config(config_file)
+
+    def test_tr_returns_japanese_message(self):
+        """tr()は日本語キーに対応する日本語文言を返します。"""
+
+        self.assertEqual(e2m.tr("tray_convert_table", "ja"), "Markdown表に変換")
+
+    def test_tr_returns_english_message(self):
+        """tr()は英語キーに対応する英語文言を返します。"""
+
+        self.assertEqual(e2m.tr("tray_convert_table", "en"), "Convert table to Markdown")
+
+    def test_tr_falls_back_for_unknown_language_and_key(self):
+        """未定義言語は英語へ、英語にもないキーはキー名へフォールバックします。"""
+
+        self.assertEqual(e2m.tr("tray_exit", "fr"), "Exit (&X)")
+        self.assertEqual(e2m.tr("missing_key", "ja"), "missing_key")
+
+    def test_detect_ui_language_uses_windows_primary_language_id(self):
+        """WindowsではGetUserDefaultUILanguageのprimary language IDで日本語を判定します。"""
+
+        fake_kernel32 = SimpleNamespace(GetUserDefaultUILanguage=Mock(return_value=0x0411))
+        with patch("sys.platform", "win32"), patch("excel_to_markdown.kernel32", fake_kernel32):
+            self.assertEqual(e2m.detect_ui_language(), "ja")
+
+    def test_detect_ui_language_uses_locale_on_non_windows(self):
+        """非Windowsではロケール名がjaから始まる場合に日本語を選びます。"""
+
+        with (
+            patch("sys.platform", "linux"),
+            patch("excel_to_markdown.locale.getlocale", return_value=("ja_JP", "UTF-8")),
+            patch("excel_to_markdown.locale.getdefaultlocale", return_value=(None, None)),
+            patch.dict("excel_to_markdown.os.environ", {}, clear=True),
+        ):
+            self.assertEqual(e2m.detect_ui_language(), "ja")
 
     def test_default_conversion_mode_config_defaults_to_table(self):
         """default_mode未指定では既存機能維持のためtableを使います。"""
