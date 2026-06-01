@@ -1,12 +1,14 @@
 
-Excelでコピーした表をMarkdownテーブルに変換する小型ツールです。Windowsではクリップボード常駐アプリとして使え、Linux/Unix/macOSなどでも標準入力のTSV変換を利用できます。
+Excelでコピーした表をMarkdownテーブルに変換するシンプルなツールです。Windowsではクリップボード常駐アプリとして使え、Linux/Unix/macOSなどでも標準入力のTSV変換を利用できます。
+
+## 簡単な説明
+<img width="779" height="360" alt="demo" src="https://github.com/user-attachments/assets/a7dd24ac-0f1e-45a5-bbb6-f704d6e33150" />
 
 ## できること
 
 - Windowsでは、Excelで範囲をコピーした後、タスクトレイ常駐アプリからMarkdownテーブルへ変換します。
 - ホットキーは `config.ini` の `key` で指定できます（初期値は `Ctrl+Alt+M`）。タスクトレイの右クリックメニュー、またはトレイアイコンのダブルクリックでも変換できます。
-- 標準ライブラリのみでクリップボード内のTSVをMarkdown化できます。
-- 任意で `pywin32` を入れ、`config.ini` の `prefer_excel = true` を指定すると、起動中のExcelの選択範囲から太字、イタリック、ハイパーリンクを読み取り、Markdownへ反映します。
+-  `pywin32` ライブラリが導入済みの環境で、`config.ini` の `prefer_excel = true` を指定すると、起動中のExcelの選択範囲から太字、イタリック、ハイパーリンクを読み取り、Markdownへ反映します。
 - タスクトレイと実行ファイルのアイコンには、同梱の `e2m_ico.ico` を利用します。
 - クリップボードTSV変換では、セル内タブ・セル内改行を含むデータは正しく復元できない場合があります。書式やセル単位の取得を重視する場合は、Windows上でExcel選択範囲変換を有効にしてください。
 
