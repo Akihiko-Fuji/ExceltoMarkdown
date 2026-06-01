@@ -115,21 +115,3 @@ python -m pip install pywin32
 
 `pywin32` がない環境、または `prefer_excel = false` の環境では、Excelがクリップボードに置いたプレーンテキスト（TSV）だけを使って変換します。`prefer_excel = true` は太字・イタリック・リンクを反映したい場合に有効ですが、Excelの現在選択範囲がコピー済みクリップボード内容と異なる場合は、現在選択範囲が変換対象になります。
 
-## Windows Executableとして配布する例
-
-配布用EXEを作る場合は、ビルド環境だけにPyInstallerを入れる構成にすると、実行時コード側の依存を増やさずに済みます。`e2m_ico.ico` はEXEアイコンおよび実行時のタスクトレイアイコンとして同梱してください。`config.ini` はショートカット変更用にEXEと同じフォルダーへ配置してください。
-
-```powershell
-python -m pip install pyinstaller
-pyinstaller --onefile --noconsole --name ExceltoMarkdown --icon e2m_ico.ico --add-data "e2m_ico.ico;." excel_to_markdown.py
-```
-
-書式反映も含めて配布したい場合は、ビルド環境に `pywin32` もインストールしてからPyInstallerを実行してください。
-
-## 開発・テスト
-
-```bash
-python -m unittest
-```
-
-変換ロジックの単体テストと `--stdin` 変換はLinux/Unix上でも実行できます。クリップボード操作、Excel COM連携、タスクトレイ常駐はWindows APIを使うためWindows上で利用してください。
