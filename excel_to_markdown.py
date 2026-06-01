@@ -15,6 +15,8 @@ import ctypes
 import importlib
 import importlib.util
 import io
+import locale
+import os
 import re
 import sys
 import threading
@@ -86,6 +88,10 @@ CONFIG_FILENAME = "config.ini"
 DEFAULT_HOTKEY = "Ctrl+Alt+M"
 DEFAULT_PREFER_EXCEL = False
 DEFAULT_CONVERSION_MODE = "table"
+DEFAULT_UI_LANGUAGE = "auto"
+UI_LANGUAGE_AUTO = "auto"
+SUPPORTED_UI_LANGUAGES = {"ja", "en"}
+JAPANESE_PRIMARY_LANGUAGE_ID = 0x11
 CONVERSION_MODE_TABLE = "table"
 CONVERSION_MODE_RICH_TEXT = "rich_text"
 CONVERSION_MODE_AUTO = "auto"
@@ -97,6 +103,42 @@ INTERNAL_CONVERSION_MODES = {*SUPPORTED_CONVERSION_MODES, CONVERSION_MODE_AUTO}
 MAX_EXCEL_SELECTION_CELLS = 5000
 CLIPBOARD_OPEN_RETRIES = 10
 CLIPBOARD_OPEN_DELAY_SECONDS = 0.05
+
+
+MESSAGES = {
+    "ja": {
+        "tray_convert_table": "Markdown表に変換",
+        "tray_convert_rich_text": "リッチテキストをMarkdown化",
+        "tray_exit": "終了 (&X)",
+        "tray_tooltip": "Excel to Markdown ({hotkey})",
+        "no_text_to_convert": "変換対象のテキストがありません。",
+        "conversion_failed": "変換に失敗しました。",
+        "log_write_failed": "ログファイルへ書き込めませんでした。",
+        "cli_description": "ExcelのTSVクリップボードテキストをMarkdownへ変換します。",
+        "cli_stdin_help": "標準入力からTSVを読み取り、Markdown表を標準出力へ書き出します",
+        "cli_once_help": "クリップボードを1回だけ変換して終了します",
+        "cli_mode_help": "--onceで使う変換モード (既定: config.ini conversion.default_mode)",
+        "non_windows_unavailable": "ExceltoMarkdownはWindows専用です。--stdinのみ非Windowsでも利用できます。",
+        "log_excel_selection_fallback": "Excel選択範囲の取得に失敗したため、クリップボードTSVへフォールバックします。",
+        "log_rich_text_html_fallback": "HTML Formatの取得または解析に失敗したため、プレーンテキストへフォールバックします。",
+    },
+    "en": {
+        "tray_convert_table": "Convert table to Markdown",
+        "tray_convert_rich_text": "Convert rich text to Markdown",
+        "tray_exit": "Exit (&X)",
+        "tray_tooltip": "Excel to Markdown ({hotkey})",
+        "no_text_to_convert": "No text to convert.",
+        "conversion_failed": "Conversion failed.",
+        "log_write_failed": "Could not write to the log file.",
+        "cli_description": "Convert Excel TSV clipboard text to Markdown.",
+        "cli_stdin_help": "read TSV from stdin and write Markdown table to stdout",
+        "cli_once_help": "convert clipboard once and exit",
+        "cli_mode_help": "conversion mode for --once (default: config.ini conversion.default_mode)",
+        "non_windows_unavailable": "ExceltoMarkdown is Windows-only. Only --stdin is available on non-Windows platforms.",
+        "log_excel_selection_fallback": "Failed to read the Excel selection; falling back to clipboard TSV.",
+        "log_rich_text_html_fallback": "Failed to read or parse HTML Format; falling back to plain text.",
+    },
+}
 
 # 非Windows環境でも変換ロジックの単体テストを実行できるよう、DLL参照を遅延させます。
 if sys.platform == "win32":
@@ -246,6 +288,9 @@ def _configure_windows_api() -> None:
     shell32.Shell_NotifyIconW.restype = wintypes.BOOL
     kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
     kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    if hasattr(kernel32, "GetUserDefaultUILanguage"):
+        kernel32.GetUserDefaultUILanguage.argtypes = []
+        kernel32.GetUserDefaultUILanguage.restype = wintypes.LANGID
     kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
     kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
     kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
@@ -531,6 +576,99 @@ def load_default_conversion_mode_config(path: Path | None = None) -> str:
     if explicit_value is None:
         return DEFAULT_CONVERSION_MODE
     return normalize_conversion_mode(explicit_value)
+
+
+
+def _language_from_locale_name(locale_name: str | None) -> str | None:
+    """ロケール名からUI言語候補を返します。"""
+
+    if not locale_name:
+        return None
+    normalized = locale_name.strip().lower()
+    if normalized.startswith("ja"):
+        return "ja"
+    return None
+
+
+def detect_ui_language() -> str:
+    """OSの表示言語またはロケールからUI言語をja/enのどちらかで判定します。"""
+
+    try:
+        if sys.platform == "win32" and kernel32 is not None and hasattr(kernel32, "GetUserDefaultUILanguage"):
+            langid = int(kernel32.GetUserDefaultUILanguage())
+            primary_language_id = langid & 0x3FF
+            if primary_language_id:
+                return "ja" if primary_language_id == JAPANESE_PRIMARY_LANGUAGE_ID else "en"
+    except Exception:
+        pass
+
+    try:
+        locale_candidates: list[str | None] = []
+        try:
+            locale_candidates.append(locale.getlocale()[0])
+        except Exception:
+            pass
+        if hasattr(locale, "LC_MESSAGES"):
+            try:
+                locale_candidates.append(locale.getlocale(locale.LC_MESSAGES)[0])
+            except Exception:
+                pass
+        try:
+            locale_candidates.append(locale.getdefaultlocale()[0])
+        except Exception:
+            pass
+        locale_candidates.extend(os.environ.get(name) for name in ("LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"))
+        for candidate in locale_candidates:
+            detected = _language_from_locale_name(candidate)
+            if detected:
+                return detected
+        return "en"
+    except Exception:
+        return "en"
+
+
+def normalize_ui_language(value: str) -> str:
+    """config.iniのUI言語設定を正規化します。"""
+
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized in {UI_LANGUAGE_AUTO, *SUPPORTED_UI_LANGUAGES}:
+        return normalized
+    raise ValueError(f"未対応のUI言語です: {value}")
+
+
+def load_ui_language_config(path: Path | None = None) -> str:
+    """config.iniからUI言語設定を読み込み、ja/enのどちらかを返します。"""
+
+    config_file = path or config_path()
+    parser = configparser.ConfigParser()
+    if config_file.exists():
+        parser.read(config_file, encoding="utf-8")
+
+    explicit_value = _get_explicit_config_option(parser, "ui", "language")
+    if explicit_value is None:
+        explicit_value = _get_explicit_config_option(parser, parser.default_section, "language")
+    value = normalize_ui_language(explicit_value or DEFAULT_UI_LANGUAGE)
+    if value == UI_LANGUAGE_AUTO:
+        return detect_ui_language()
+    return value
+
+
+def get_ui_language() -> str:
+    """現在のUI言語設定を返します。"""
+
+    return load_ui_language_config()
+
+
+def tr(key: str, language: str | None = None, **kwargs) -> str:
+    """UI表示文言を指定言語で取得し、欠けている場合は英語へフォールバックします。"""
+
+    selected_language = language or get_ui_language()
+    template = MESSAGES.get(selected_language, {}).get(key)
+    if template is None:
+        template = MESSAGES["en"].get(key, key)
+    if kwargs:
+        return template.format(**kwargs)
+    return template
 
 
 def escape_markdown_cell(value: object) -> str:
@@ -962,7 +1100,7 @@ def _log_rich_text_html_fallback(error: BaseException) -> None:
     """HTML Formatの読取・解析失敗時にプレーンテキストへ戻る理由をログへ残します。"""
 
     def write_fallback_reason(log_file) -> None:
-        print("HTML Formatの取得または解析に失敗したため、プレーンテキストへフォールバックします。", file=log_file)
+        print(tr("log_rich_text_html_fallback"), file=log_file)
         traceback.print_exception(type(error), error, error.__traceback__, file=log_file)
 
     write_error_log(write_fallback_reason)
@@ -1086,7 +1224,7 @@ def _log_excel_selection_fallback(error: BaseException) -> None:
     """Excel選択範囲の取得に失敗してクリップボード変換へ戻る理由をログへ残します。"""
 
     def write_fallback_reason(log_file) -> None:
-        print("Excel選択範囲の取得に失敗したため、クリップボードTSVへフォールバックします。", file=log_file)
+        print(tr("log_excel_selection_fallback"), file=log_file)
         traceback.print_exception(type(error), error, error.__traceback__, file=log_file)
 
     write_error_log(write_fallback_reason)
@@ -1140,6 +1278,7 @@ class TrayApplication:
         """非表示ウィンドウとメッセージ処理コールバックの準備を行います。"""
 
         _require_windows()
+        self.language = load_ui_language_config()
         self.hotkey = load_hotkey_config()
         self.prefer_excel = load_prefer_excel_config()
         self.default_mode = load_default_conversion_mode_config()
@@ -1212,7 +1351,7 @@ class TrayApplication:
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP
         nid.uCallbackMessage = WM_TRAYICON
         nid.hIcon = self._icon
-        nid.szTip = f"Excel to Markdown ({self.hotkey.label})"
+        nid.szTip = tr("tray_tooltip", getattr(self, "language", "en"), hotkey=self.hotkey.label)
         return nid
 
     def _add_tray_icon(self) -> None:
@@ -1234,9 +1373,10 @@ class TrayApplication:
         menu = user32.CreatePopupMenu()
         if not menu:
             return
-        user32.AppendMenuW(menu, 0, MENU_CONVERT_TABLE, "Markdown表に変換")
-        user32.AppendMenuW(menu, 0, MENU_CONVERT_RICH_TEXT, "リッチテキストをMarkdown化")
-        user32.AppendMenuW(menu, 0, MENU_EXIT, "終了 (&X)")
+        language = getattr(self, "language", "en")
+        user32.AppendMenuW(menu, 0, MENU_CONVERT_TABLE, tr("tray_convert_table", language))
+        user32.AppendMenuW(menu, 0, MENU_CONVERT_RICH_TEXT, tr("tray_convert_rich_text", language))
+        user32.AppendMenuW(menu, 0, MENU_EXIT, tr("tray_exit", language))
         point = POINT()
         user32.GetCursorPos(ctypes.byref(point))
         user32.SetForegroundWindow(self.hwnd)
@@ -1272,13 +1412,19 @@ class TrayApplication:
             if markdown:
                 user32.MessageBeep(0xFFFFFFFF)
             else:
-                user32.MessageBoxW(self.hwnd, "変換対象のテキストがありません。", "Excel to Markdown", 0x40)
+                user32.MessageBoxW(
+                    self.hwnd,
+                    tr("no_text_to_convert", getattr(self, "language", "en")),
+                    "Excel to Markdown",
+                    0x40,
+                )
         except Exception:
             log_path = write_error_log(lambda log_file: traceback.print_exc(file=log_file))
+            language = getattr(self, "language", "en")
             if log_path is None:
-                message = "変換に失敗しました。\nログファイルへ書き込めませんでした。"
+                message = f"{tr('conversion_failed', language)}\n{tr('log_write_failed', language)}"
             else:
-                message = f"変換に失敗しました。\n{log_path}"
+                message = f"{tr('conversion_failed', language)}\n{log_path}"
             user32.MessageBoxW(self.hwnd, message, "Excel to Markdown", 0x10)
         finally:
             self._convert_lock.release()
@@ -1326,14 +1472,15 @@ class TrayApplication:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI引数を解釈し、標準入力・1回変換・常駐起動の各モードを実行します。"""
 
-    parser = argparse.ArgumentParser(description="Convert Excel TSV clipboard text to Markdown.")
-    parser.add_argument("--stdin", action="store_true", help="read TSV from stdin and write Markdown table to stdout")
-    parser.add_argument("--once", action="store_true", help="convert clipboard once and exit")
+    language = load_ui_language_config()
+    parser = argparse.ArgumentParser(description=tr("cli_description", language))
+    parser.add_argument("--stdin", action="store_true", help=tr("cli_stdin_help", language))
+    parser.add_argument("--once", action="store_true", help=tr("cli_once_help", language))
     parser.add_argument(
         "--mode",
         choices=sorted(SUPPORTED_CONVERSION_MODES),
         default=None,
-        help="conversion mode for --once (default: config.ini conversion.default_mode)",
+        help=tr("cli_mode_help", language),
     )
     args = parser.parse_args(argv)
 
@@ -1341,7 +1488,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(convert_text_to_markdown(sys.stdin.read()))
         return 0
     if not is_windows():
-        print("ExceltoMarkdownはWindows専用です。--stdinのみ非Windowsでも利用できます。", file=sys.stderr)
+        print(tr("non_windows_unavailable", language), file=sys.stderr)
         return 1
     if args.once:
         convert_clipboard_to_markdown(

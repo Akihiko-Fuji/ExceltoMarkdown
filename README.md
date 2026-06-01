@@ -50,7 +50,7 @@ python excel_to_markdown.py
 ```
 
 1. Excelで表の範囲をコピーします。
-2. `config.ini` に設定したショートカットキー（初期値は `Ctrl+Alt+M`）を押すか、タスクトレイアイコンのメニューから「Markdownに変換」を選びます。
+2. `config.ini` に設定したショートカットキー（初期値は `Ctrl+Alt+M`）を押すか、タスクトレイアイコンのメニューから「Markdown表に変換」を選びます。
 3. クリップボードの内容がMarkdownテーブルに置き換わるので、`.md` ファイルへ貼り付けます。
 
 ### ショートカットキーの設定
@@ -65,11 +65,29 @@ key = Ctrl+Alt+M
 # 通常はコピー済みクリップボードTSVを優先します。
 # trueにすると、pywin32利用時だけExcelの現在選択範囲を先に読み取ります。
 prefer_excel = false
+
+[ui]
+# UI language. auto uses the OS display language.
+# Supported values: auto, ja, en
+language = auto
 ```
 
 `prefer_excel` の真偽値は `1` / `yes` / `true` / `on` / `enabled` と `0` / `no` / `false` / `off` / `disabled` を指定できます。
 
 指定できる修飾キーは `Ctrl` / `Alt` / `Shift` / `Win` です。通常キーは英数字1文字、`F1`〜`F24`、`Enter`、`Esc`、`Space`、`Tab`、矢印キーなどを指定できます。例: `Ctrl+Shift+M`、`Alt+F12`。 `Ctrl+Shift+V` はWindowsやOfficeで「テキストのみ貼り付け」に使われるため、既定値にはしていません。
+
+### UI言語の設定
+
+UIは、OSの表示言語が日本語の場合は日本語、それ以外の言語環境では英語で表示します。`config.ini` の `[ui] language` で `ja` / `en` / `auto` を指定すると、OS表示言語に関係なくUI言語を上書きできます。
+
+```ini
+[ui]
+# UI language. auto uses the OS display language.
+# Supported values: auto, ja, en
+language = auto
+```
+
+`[ui] language = auto` はUI言語用の自動判定です。`[conversion] default_mode` で内部的に使われる変換モードの `auto` とは別の設定で、変換モード側の `auto` は現在ユーザー設定として指定できません。
 
 ### 1回だけ変換して終了（Windowsのみ）
 
