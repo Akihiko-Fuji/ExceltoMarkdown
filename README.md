@@ -2,7 +2,13 @@
 Excelでコピーした表をMarkdownテーブルに変換するシンプルなツールです。Windowsではクリップボード常駐アプリとして使え、Linux/Unix/macOSなどでも標準入力のTSV変換を利用できます。
 
 ## 簡単な説明
+主に2つの機能があります。
+
 <img width="779" height="360" alt="demo" src="https://github.com/user-attachments/assets/a7dd24ac-0f1e-45a5-bbb6-f704d6e33150" />
+ExcelテーブルのMarkdown変換
+
+<img width="1135" height="360" alt="demo2" src="https://github.com/user-attachments/assets/2a52b316-55fa-4139-a133-5a1f6d02be03" />
+テキストに含まれる、太字、イタリック、リンクなどの装飾のMarkdown変換
 
 ## できること
 
