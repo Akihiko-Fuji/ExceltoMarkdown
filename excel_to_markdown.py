@@ -89,6 +89,9 @@ DEFAULT_CONVERSION_MODE = "table"
 CONVERSION_MODE_TABLE = "table"
 CONVERSION_MODE_RICH_TEXT = "rich_text"
 CONVERSION_MODE_AUTO = "auto"
+# autoは将来の自動判定強化用の内部モードです。
+# Excel表コピーでもHTML Formatが含まれることがあるため、
+# 現時点ではCLI/config.iniのユーザー選択肢からは意図的に除外します。
 SUPPORTED_CONVERSION_MODES = {CONVERSION_MODE_TABLE, CONVERSION_MODE_RICH_TEXT}
 INTERNAL_CONVERSION_MODES = {*SUPPORTED_CONVERSION_MODES, CONVERSION_MODE_AUTO}
 MAX_EXCEL_SELECTION_CELLS = 5000
@@ -424,6 +427,8 @@ def _get_section_own_options(parser: configparser.ConfigParser, section: str) ->
         if stripped.startswith("[") and stripped.endswith("]"):
             current_section = stripped[1:-1]
             continue
+        # ConfigParser.write() が出力する複数行値の継続行は先頭に空白文字を持つため、
+        # セクション直下のoption候補から除外します。
         if current_section != section or line[:1].isspace():
             continue
 
