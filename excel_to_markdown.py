@@ -676,6 +676,8 @@ class _RichHtmlToMarkdownParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if tag in HTML_VOID_TAGS:
+            return
         style_markers = self._style_marker_stack.pop() if self._style_marker_stack else []
         self._parts.extend(reversed(style_markers))
         if tag in {"strong", "b"}:

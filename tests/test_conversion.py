@@ -144,6 +144,12 @@ class ConversionTests(unittest.TestCase):
         html = '<span style="font-weight: bold;">a<img src="x" />b</span>'
         self.assertEqual(convert_html_fragment_to_markdown(html), "**ab**\n")
 
+    def test_html_explicitly_closed_void_tag_does_not_pop_parent_style_stack(self):
+        """不正な終了タグ付きvoid要素でも親要素のstyleスタックを保持します。"""
+
+        html = '<span style="font-weight: bold;">a<img src="x"></img>b</span>'
+        self.assertEqual(convert_html_fragment_to_markdown(html), "**ab**\n")
+
     def test_html_nested_list_indentation_is_preserved(self):
         """ネストしたul/liの行頭インデントをmarkdown整形で消さないことを確認します。"""
 
