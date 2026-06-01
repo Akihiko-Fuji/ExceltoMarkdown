@@ -6,12 +6,12 @@ Excelでコピーした表をMarkdownテーブルに変換するシンプルな�
 
 <img width="779" height="360" alt="demo" src="https://github.com/user-attachments/assets/a7dd24ac-0f1e-45a5-bbb6-f704d6e33150" />
 
-ひとつはタブ区切りテーブル(tsv)のMarkdown変換機能。Microsoft Excelを想定しています。
+ひとつはタブ区切りテーブル(tsv)のMarkdown変換機能。Microsoft Excel上の複数セルのコピーを想定しています。
 
 
 <img width="779" height="247" alt="demo2" src="https://github.com/user-attachments/assets/f801dad8-5648-405b-8845-85faef3e4e9c" />
 
-もうひとつはテキストに含まれる太字、イタリック、リンクなどの装飾のMarkdown変換機能。Microsoft WordやChromeなどのブラウザを想定しています。
+もうひとつはテキストに含まれる太字、イタリック、リンクなどの装飾のMarkdown変換機能。Microsoft WordやChromeなどのブラウザからのコピーを想定しています。
 
 
 ## このツールができること
