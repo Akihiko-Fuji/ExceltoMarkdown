@@ -1,4 +1,5 @@
 import configparser
+import ctypes
 import io
 import tempfile
 import unittest
@@ -144,6 +145,15 @@ class ConversionTests(unittest.TestCase):
         html = '<span style="font-weight: bold;">a<img src="x" />b</span>'
         self.assertEqual(convert_html_fragment_to_markdown(html), "**ab**\n")
 
+    def test_many_self_closing_void_tags_do_not_grow_style_stack(self):
+        """大量の自己終了void要素はstyleスタックへ何も積まないことを確認します。"""
+
+        parser = e2m._RichHtmlToMarkdownParser()
+        parser.feed(("<img src='x' />" * 1000) + ("<input value='x' />" * 1000))
+        parser.close()
+        self.assertEqual(parser._style_marker_stack, [])
+        self.assertEqual(parser.markdown(), "")
+
     def test_html_explicitly_closed_void_tag_does_not_pop_parent_style_stack(self):
         """不正な終了タグ付きvoid要素でも親要素のstyleスタックを保持します。"""
 
@@ -274,6 +284,28 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_ALT)
         self.assertEqual(hotkey.virtual_key, ord("M"))
 
+    def test_multiline_values_with_delimiters_are_not_seen_as_own_options(self):
+        """複数行値中の=や:を継続行として扱い、別オプションと誤認しないことを確認します。"""
+
+        parser = configparser.ConfigParser()
+        parser.read_string(
+            "[shortcut]\n"
+            "notes = first line\n"
+            "  contains = equal\n"
+            "  contains: colon\n"
+            "key = Ctrl+Alt+M\n"
+        )
+        self.assertEqual(e2m._get_section_own_options(parser, "shortcut"), {"notes", "key"})
+
+    def test_section_name_containing_bracket_keeps_current_own_option_detection(self):
+        """セクション名に]を含む場合でも現在の手動パースで直下オプションを確認します。"""
+
+        parser = configparser.ConfigParser()
+        parser.add_section("short]cut")
+        parser.set("short]cut", "key", "Ctrl+Alt+M")
+        self.assertEqual(e2m._get_section_own_options(parser, "short]cut"), {"key"})
+        self.assertEqual(e2m._get_explicit_config_option(parser, "short]cut", "key"), "Ctrl+Alt+M")
+
     def test_bold_italic_formatting_uses_triple_marker(self):
         """太字とイタリックを併用するセルはGFM互換の一括マーカーで整形します。"""
 
@@ -351,6 +383,50 @@ class ConversionTests(unittest.TestCase):
         ):
             markdown = convert_clipboard_or_excel_selection(prefer_excel=True)
         self.assertIn("| A | B |", markdown)
+
+    def test_read_clipboard_format_bytes_raises_when_global_size_fails(self):
+        """GlobalSizeが0かつlast_errorありなら原因をWinErrorとして表面化します。"""
+
+        fake_user32 = SimpleNamespace(GetClipboardData=Mock(return_value=123))
+        fake_kernel32 = SimpleNamespace(
+            GlobalSize=Mock(return_value=0),
+            GlobalLock=Mock(),
+            GlobalUnlock=Mock(),
+        )
+        sentinel_error = OSError("GlobalSize failed")
+        win_error = Mock(return_value=sentinel_error)
+        with (
+            patch("excel_to_markdown.user32", fake_user32),
+            patch("excel_to_markdown.kernel32", fake_kernel32),
+            patch.object(ctypes, "set_last_error", Mock(), create=True),
+            patch.object(ctypes, "get_last_error", return_value=8, create=True),
+            patch.object(ctypes, "WinError", win_error, create=True),
+        ):
+            with self.assertRaises(OSError) as context:
+                e2m._read_clipboard_format_bytes(777)
+        self.assertIs(context.exception, sentinel_error)
+        win_error.assert_called_once_with(8)
+        fake_kernel32.GlobalLock.assert_not_called()
+        fake_kernel32.GlobalUnlock.assert_not_called()
+
+    def test_read_clipboard_format_bytes_uses_nul_fallback_when_global_size_is_unknown(self):
+        """GlobalSizeが0でもlast_errorが0なら従来どおりNUL終端読み取りへフォールバックします。"""
+
+        fake_user32 = SimpleNamespace(GetClipboardData=Mock(return_value=123))
+        fake_kernel32 = SimpleNamespace(
+            GlobalSize=Mock(return_value=0),
+            GlobalLock=Mock(return_value=456),
+            GlobalUnlock=Mock(),
+        )
+        with (
+            patch("excel_to_markdown.user32", fake_user32),
+            patch("excel_to_markdown.kernel32", fake_kernel32),
+            patch.object(ctypes, "set_last_error", Mock(), create=True),
+            patch.object(ctypes, "get_last_error", return_value=0, create=True),
+            patch("excel_to_markdown.ctypes.string_at", return_value=b"abc\0"),
+        ):
+            self.assertEqual(e2m._read_clipboard_format_bytes(777), b"abc")
+        fake_kernel32.GlobalUnlock.assert_called_once_with(123)
 
     def test_read_clipboard_text_raises_when_global_lock_fails(self):
         """クリップボードメモリのロック失敗は空文字列ではなく例外として扱います。"""
@@ -435,6 +511,23 @@ class ConversionTests(unittest.TestCase):
         finally:
             app._convert_lock.release()
         convert.assert_not_called()
+        fake_user32.MessageBeep.assert_called_once_with(0xFFFFFFFF)
+
+    def test_convert_safely_prefers_explicit_mode_over_default_mode(self):
+        """明示modeが渡された場合はself.default_modeより優先して変換へ渡します。"""
+
+        fake_user32 = SimpleNamespace(MessageBeep=Mock(), MessageBoxW=Mock())
+        app = object.__new__(TrayApplication)
+        app._convert_lock = e2m.threading.Lock()
+        app.prefer_excel = True
+        app.default_mode = "table"
+        app.hwnd = 100
+        with (
+            patch("excel_to_markdown.user32", fake_user32),
+            patch("excel_to_markdown.convert_clipboard_to_markdown", return_value="markdown") as convert,
+        ):
+            app._convert_safely("rich_text")
+        convert.assert_called_once_with("rich_text", prefer_excel=True)
         fake_user32.MessageBeep.assert_called_once_with(0xFFFFFFFF)
 
     def test_convert_safely_does_not_beep_for_empty_markdown(self):

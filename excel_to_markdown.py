@@ -701,7 +701,7 @@ class _RichHtmlToMarkdownParser(HTMLParser):
         if tag == "br":
             self._ensure_line_break()
         elif tag in HTML_VOID_TAGS:
-            self.handle_starttag(tag, attrs)
+            return
         else:
             self.handle_starttag(tag, attrs)
             self.handle_endtag(tag)
@@ -890,7 +890,14 @@ def _read_clipboard_format_bytes(format_id: int) -> bytes:
     handle = user32.GetClipboardData(format_id)
     if not handle:
         return b""
+    if hasattr(ctypes, "set_last_error"):
+        ctypes.set_last_error(0)
     size = int(kernel32.GlobalSize(handle))
+    if size == 0:
+        get_last_error = getattr(ctypes, "get_last_error", None)
+        last_error = get_last_error() if get_last_error else 0
+        if last_error:
+            raise ctypes.WinError(last_error)
     pointer = kernel32.GlobalLock(handle)
     if not pointer:
         raise MemoryError("Could not lock clipboard memory.")
@@ -1252,9 +1259,11 @@ class TrayApplication:
             return
         try:
             markdown = convert_clipboard_to_markdown(
-                mode or getattr(self, "default_mode", DEFAULT_CONVERSION_MODE),
+                mode or self.default_mode,
                 prefer_excel=self.prefer_excel,
             )
+            # convert_clipboard_to_markdown() は成功時に各変換経路内でクリップボードへ書き込みます。
+            # ここでは結果の有無に応じて通知だけ行い、書き込み処理を重複させません。
             if markdown:
                 user32.MessageBeep(0xFFFFFFFF)
             else:
