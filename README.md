@@ -63,6 +63,16 @@ B	20	"2行の
 
 ## インストール
 
+### Windows x64版（推奨）
+
+[GitHub Releases](https://github.com/Akihiko-Fuji/ExceltoMarkdown/releases/latest) から `ExcelToMarkdown-windows-x64.zip` をダウンロードし、ZIPを展開して `ExcelToMarkdown.exe` を起動します。
+
+Nuitkaのstandalone配布にはEXEが利用するDLLなどが含まれます。`ExcelToMarkdown.exe` だけを取り出さず、展開したフォルダー一式を同じ場所に置いてください。設定はEXEと同じ場所の `config.ini` を編集します。
+
+配布ZIPにはSHA-256 checksumの `ExcelToMarkdown-windows-x64.zip.sha256` も添付します。
+
+### Pythonから実行
+
 Python 3.11以降を使用します。
 
 ```powershell
@@ -170,7 +180,23 @@ python -m unittest discover -v
 python -m pip wheel . --no-deps --no-build-isolation
 ```
 
-CIはUbuntuとWindowsの両方でunit testを実行します。`v*` tagではwheel／source distributionをbuildし、GitHub Releaseへ添付します。
+### Windows x64 standalone build
+
+64-bit版Python 3.11を使い、dependencyとNuitkaをインストールしてからbuild scriptを実行します。
+
+```batch
+python -m pip install ".[excel]" "Nuitka==4.1.3"
+build_windows.cmd
+```
+
+生成物は `excel_to_markdown.dist` フォルダーです。動作確認・配布ともフォルダー一式を使用します。
+
+CIはUbuntuとWindowsの両方でunit testを実行します。package versionと同じ `v*` tag（例: `v1.1.0`）をpushすると、次のファイルを [ExceltoMarkdownのGitHub Releases](https://github.com/Akihiko-Fuji/ExceltoMarkdown/releases) へ添付します。
+
+- `ExcelToMarkdown-windows-x64.zip`
+- `ExcelToMarkdown-windows-x64.zip.sha256`
+- Python wheel（`.whl`）
+- source distribution（`.tar.gz`）
 
 ## ライセンス
 

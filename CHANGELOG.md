@@ -4,10 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 1.1.0 - 2026-08-27
+
 ### Added
 
 - Excel quoted TSV support for embedded newlines, tabs, and escaped quotes.
 - Windows CI and tagged GitHub Release builds.
+- Nuitka standalone Windows x64 ZIP and SHA-256 checksum release assets.
 - Installable Python package and `exceltomarkdown` console command.
 
 ### Changed
