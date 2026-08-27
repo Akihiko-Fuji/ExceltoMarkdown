@@ -2,8 +2,6 @@ name: Release
 
 on:
   push:
-    branches:
-      - "improve/windows-x64-release"
     tags:
       - "v*"
   pull_request:
