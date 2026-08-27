@@ -126,7 +126,12 @@ Linux / Unix / macOSでは、Windows APIを使わない `--stdin` のみ利用�
 
 ## 設定
 
-source checkoutではリポジトリ直下、EXE配布時はEXEと同じ場所にある `config.ini` を読み込みます。
+カレントディレクトリに `config.ini` があればそれを読み込みます。そのため、cloneしたリポジトリで
+`exceltomarkdown` を起動するとリポジトリ直下の設定が使われます。それ以外の場合、pipでインストールした
+コマンドは `%APPDATA%\\ExceltoMarkdown\\config.ini`（Windows）、または
+`$XDG_CONFIG_HOME/exceltomarkdown/config.ini`（未設定時は `~/.config/exceltomarkdown/config.ini`）を
+読み込みます。設定ファイルがなくても下記の既定値で動作します。EXE配布時は従来どおりEXEと同じ場所です。
+エラーログも同じディレクトリに保存されます。
 
 ```ini
 [shortcut]

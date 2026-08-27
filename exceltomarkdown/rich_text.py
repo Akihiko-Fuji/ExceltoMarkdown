@@ -35,6 +35,8 @@ def _escape_block_prefix(text: str) -> str:
     text = re.sub(r"^( {0,3}\d{1,9})([.)])(?=\s)", r"\1\\\2", text)
     if re.fullmatch(r" {0,3}(-\s*){3,}", text):
         text = text.replace("-", "\\-", 1)
+    elif re.fullmatch(r" {0,3}(=\s*){3,}", text):
+        text = text.replace("=", "\\=", 1)
     return text
 
 
@@ -62,6 +64,22 @@ class _RichHtmlToMarkdownParser(HTMLParser):
         self._list_stack: list[dict[str, int | str]] = []
         self._link_stack: list[str] = []
         self._style_marker_stack: list[list[str]] = []
+        self._tail = ""
+        self._line_number = 0
+        self._list_lines: set[int] = set()
+
+    def _append(self, value: str) -> None:
+        """出力とその末尾状態を、既存出力を再結合せずに更新します。"""
+
+        if not value:
+            return
+        self._parts.append(value)
+        self._line_number += value.count("\n")
+        self._tail = (self._tail + value)[-2:]
+
+    def _extend(self, values: list[str]) -> None:
+        for value in values:
+            self._append(value)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
@@ -79,9 +97,9 @@ class _RichHtmlToMarkdownParser(HTMLParser):
             self._start_list_item()
 
         if tag in {"strong", "b"}:
-            self._parts.append("**")
+            self._append("**")
         elif tag in {"em", "i"}:
-            self._parts.append("*")
+            self._append("*")
         elif tag == "a":
             href = ""
             for name, value in attrs:
@@ -89,7 +107,7 @@ class _RichHtmlToMarkdownParser(HTMLParser):
                     href = escape_link_destination(value)
                     break
             self._link_stack.append(href)
-            self._parts.append("[")
+            self._append("[")
 
         style_markers = self._style_markers(
             attrs,
@@ -97,21 +115,21 @@ class _RichHtmlToMarkdownParser(HTMLParser):
             skip_italic=tag in {"em", "i"},
         )
         self._style_marker_stack.append(style_markers)
-        self._parts.extend(style_markers)
+        self._extend(style_markers)
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
         if tag in HTML_VOID_TAGS:
             return
         style_markers = self._style_marker_stack.pop() if self._style_marker_stack else []
-        self._parts.extend(reversed(style_markers))
+        self._extend(list(reversed(style_markers)))
         if tag in {"strong", "b"}:
-            self._parts.append("**")
+            self._append("**")
         elif tag in {"em", "i"}:
-            self._parts.append("*")
+            self._append("*")
         elif tag == "a":
             href = self._link_stack.pop() if self._link_stack else ""
-            self._parts.append(f"]({href})" if href else "]")
+            self._append(f"]({href})" if href else "]")
         elif tag in {"p", "div"}:
             self._ensure_paragraph_break()
         elif tag == "li":
@@ -137,14 +155,14 @@ class _RichHtmlToMarkdownParser(HTMLParser):
         text = re.sub(r"\s+", " ", data)
         if not text.strip():
             if self._parts and not self._parts[-1].endswith((" ", "\n", "[")):
-                self._parts.append(" ")
+                self._append(" ")
             return
-        current = "".join(self._parts)
-        self._parts.append(escape_markdown_text(text, at_line_start=not current or current.endswith("\n")))
+        self._append(escape_markdown_text(text))
 
     def markdown(self) -> str:
         text = "".join(self._parts)
         lines = [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+        lines = [line if index in self._list_lines else _escape_block_prefix(line) for index, line in enumerate(lines)]
         compacted: list[str] = []
         blank_count = 0
         for line in lines:
@@ -162,17 +180,16 @@ class _RichHtmlToMarkdownParser(HTMLParser):
     def _ensure_line_break(self) -> None:
         if not self._parts:
             return
-        current = "".join(self._parts)
-        if not current.endswith("\n"):
-            self._parts.append("\n")
+        if not self._tail.endswith("\n"):
+            self._append("\n")
 
     def _ensure_paragraph_break(self) -> None:
         if not self._parts:
             return
-        current = "".join(self._parts).rstrip(" ")
-        if not current or current.endswith("\n\n"):
+        tail = self._tail.rstrip(" ")
+        if not tail or tail.endswith("\n\n"):
             return
-        self._parts.append("\n" if current.endswith("\n") else "\n\n")
+        self._append("\n" if tail.endswith("\n") else "\n\n")
 
     def _start_list_item(self) -> None:
         self._ensure_line_break()
@@ -182,7 +199,8 @@ class _RichHtmlToMarkdownParser(HTMLParser):
             index = int(self._list_stack[-1]["index"])
             marker = f"{index}. "
             self._list_stack[-1]["index"] = index + 1
-        self._parts.append(f"{indent}{marker}")
+        self._list_lines.add(self._line_number)
+        self._append(f"{indent}{marker}")
 
     def _style_markers(
         self,
