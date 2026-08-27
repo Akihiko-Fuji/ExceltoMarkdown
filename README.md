@@ -1,118 +1,177 @@
+# ExceltoMarkdown
 
-Excelでコピーした表をMarkdownテーブルに変換するシンプルなツールです。Windowsではクリップボード常駐アプリとして使え、Linux/Unix/macOSなどでも標準入力のTSV変換を利用できます。
+Excel・Word・Webブラウザからコピーした内容を、GitHub・Markdown文書・LLMで扱いやすい **GitHub Flavored Markdown（GFM）** へ変換する軽量なクリップボードツールです。
 
-## 簡単な説明動画
-主に2つの機能があります。
+このツールは、ExcelをMarkdownで置き換えるものではありません。Excelでの計算・編集・共有はそのまま活かし、結果の一部をGit、文書、AIへ渡す際の摩擦を減らす「変換ブリッジ」です。
 
-<img width="779" height="360" alt="demo" src="https://github.com/user-attachments/assets/a7dd24ac-0f1e-45a5-bbb6-f704d6e33150" />
+> [!IMPORTANT]
+> Excelファイルを完全・可逆に変換することは目的としていません。数式、セル結合、色、罫線、列幅、図形など、GFMで表現できない情報は変換時に失われます。
 
-ひとつはタブ区切りテーブル(tsv)のMarkdown変換機能。Microsoft Excel上の複数セルのコピーを想定しています。
+## 主な機能
 
+- ExcelからコピーしたTSVをGFM tableへ変換
+- Excelのquoted TSVを解釈し、セル内改行・タブ・二重引用符を保持
+- WordやブラウザのClipboard HTML Formatから、段落・太字・斜体・リンク・簡易リストを変換
+- Windowsのタスクトレイ、ホットキー、ダブルクリックから変換
+- 任意のExcel COM連携による表示文字列・太字・斜体・ハイパーリンクの取得
+- Windows以外でも利用できる標準入力（`--stdin`）変換
+- 日本語／英語UI
 
-<img width="779" height="247" alt="demo2" src="https://github.com/user-attachments/assets/f801dad8-5648-405b-8845-85faef3e4e9c" />
+## 変換契約
 
-もうひとつはテキストに含まれる太字、イタリック、リンクなどの装飾のMarkdown変換機能。Microsoft WordやChromeなどのブラウザからのコピーを想定しています。
+変換時に保持する情報と、失われる・正規化される情報は次のとおりです。
 
+| 入力 | 保持する情報 | 失われる／正規化される情報 |
+| --- | --- | --- |
+| Excel clipboard TSV | セル文字列、行列構造、quoted field内の改行・タブ・引用符 | 書式、数式そのもの、結合セル、色、罫線、列幅、図形 |
+| Excel COM（任意） | 表示文字列、太字、斜体、ハイパーリンク | 色、罫線、フォントサイズ、数式そのもの、図形 |
+| Word / Web HTML | 段落、改行、太字、斜体、リンク、簡易リスト | レイアウト、画像、複雑なCSS、未対応のHTML構造 |
+| セル内改行 | 改行位置 | GFM table内で `<br>` へ正規化 |
+| GFM table | 行列 | **コピー範囲の先頭行をheader rowとして扱う** |
 
-## このツールができること
-
-- Windowsでは、Excelで範囲をコピーした後、タスクトレイ常駐アプリからMarkdownテーブルへ変換します。
-- ホットキーは `config.ini` の `key` で指定できます（初期値は `Ctrl+Alt+M`）。タスクトレイの右クリックメニュー、またはトレイアイコンのダブルクリックでも変換できます。
--  `pywin32` ライブラリが導入済みの環境で、`config.ini` の `prefer_excel = true` を指定すると、起動中のExcelの選択範囲から太字、イタリック、ハイパーリンクを読み取り、Markdownへ反映します。
-- タスクトレイと実行ファイルのアイコンには、同梱の `e2m_ico.ico` を利用します。
-- クリップボードTSV変換では、セル内タブ・セル内改行を含むデータは正しく復元できない場合があります。書式やセル単位の取得を重視する場合は、Windows上でExcel選択範囲変換を有効にしてください。
+GFM tableにはheader rowとdelimiter rowが必須です。そのため、元データに見出しがなくても先頭行へheaderの意味が付与されます。これは表示上の変換だけでなく、意味上の変換でもあります。
 
 ## 変換例
 
-Excelのコピー結果が次のテキストの場合:
+Excelのコピー結果が次のTSVの場合:
 
 ```text
-A1	B1	C1
-A2	B2	C2
-A3	B3	C3
+品名	数量	備考
+A	10	通常品
+B	20	"2行の
+備考"
 ```
 
-出力は次のMarkdownになります。
+セル内改行がExcelのquoted fieldとして渡された場合、次のGFM tableになります。
 
 ```markdown
-| A1 | B1 | C1 |
+| 品名 | 数量 | 備考 |
 | --- | --- | --- |
-| A2 | B2 | C2 |
-| A3 | B3 | C3 |
+| A | 10 | 通常品 |
+| B | 20 | 2行の<br>備考 |
 ```
+
+## 説明動画
+
+### Excel表をGFM tableへ変換
+
+<img width="779" height="360" alt="Excel table conversion demo" src="https://github.com/user-attachments/assets/a7dd24ac-0f1e-45a5-bbb6-f704d6e33150" />
+
+### Word・ブラウザの装飾をGFMへ変換
+
+<img width="779" height="247" alt="Rich text conversion demo" src="https://github.com/user-attachments/assets/f801dad8-5648-405b-8845-85faef3e4e9c" />
+
+## インストール
+
+Python 3.11以降を使用します。
+
+```powershell
+git clone https://github.com/Akihiko-Fuji/ExceltoMarkdown.git
+cd ExceltoMarkdown
+python -m pip install .
+```
+
+Excel COM連携も利用する場合は、Windowsで任意dependencyを追加します。
+
+```powershell
+python -m pip install ".[excel]"
+```
+
+source checkoutから従来どおり `python excel_to_markdown.py` で起動することもできます。
 
 ## 使い方
 
-### タスクトレイ常駐アプリとして起動
+### Windowsタスクトレイアプリ
 
 ```powershell
-python excel_to_markdown.py
+exceltomarkdown
+```
+
+または:
+
+```powershell
+python -m exceltomarkdown
 ```
 
 1. Excelで表の範囲をコピーします。
-2. `config.ini` に設定したショートカットキー（初期値は `Ctrl+Alt+M`）を押すか、タスクトレイアイコンのメニューから「Markdown表に変換」を選びます。
-3. クリップボードの内容がMarkdownテーブルに置き換わるので、`.md` ファイルへ貼り付けます。
+2. 初期値 `Ctrl+Alt+M` のホットキー、タスクトレイメニュー、またはトレイアイコンのダブルクリックで変換します。
+3. クリップボードがGFMへ置き換わるので、`.md` ファイルなどへ貼り付けます。
 
-### ショートカットキーの設定
+右クリックメニューでは「Markdown表に変換」と「リッチテキストをMarkdown化」を明示的に選べます。
 
-`excel_to_markdown.py` と同じフォルダー（EXE配布時はEXEと同じフォルダー）にある `config.ini` で、変換に使うショートカットキーを指定します。
+### 1回だけ変換（Windows）
+
+```powershell
+exceltomarkdown --once
+exceltomarkdown --once --mode rich_text
+```
+
+### 標準入力から変換（OS共通）
+
+```powershell
+Get-Content sample.tsv -Raw | exceltomarkdown --stdin
+```
+
+Linux / Unix / macOSでは、Windows APIを使わない `--stdin` のみ利用できます。
+
+## 設定
+
+source checkoutではリポジトリ直下、EXE配布時はEXEと同じ場所にある `config.ini` を読み込みます。
 
 ```ini
 [shortcut]
 key = Ctrl+Alt+M
 
 [conversion]
-# 通常はコピー済みクリップボードTSVを優先します。
-# trueにすると、pywin32利用時だけExcelの現在選択範囲を先に読み取ります。
+# table または rich_text
+default_mode = table
+
+# trueの場合、pywin32経由のExcel選択範囲をclipboard TSVより優先
 prefer_excel = false
 
 [ui]
-# UI language. auto uses the OS display language.
-# Supported values: auto, ja, en
+# auto / ja / en
 language = auto
 ```
 
-`prefer_excel` の真偽値は `1` / `yes` / `true` / `on` / `enabled` と `0` / `no` / `false` / `off` / `disabled` を指定できます。
+`prefer_excel` は `1 / yes / true / on / enabled` または `0 / no / false / off / disabled` を指定できます。
 
-指定できる修飾キーは `Ctrl` / `Alt` / `Shift` / `Win` です。通常キーは英数字1文字、`F1`〜`F24`、`Enter`、`Esc`、`Space`、`Tab`、矢印キーなどを指定できます。例: `Ctrl+Shift+M`、`Alt+F12`。 `Ctrl+Shift+V` はWindowsやOfficeで「テキストのみ貼り付け」に使われるため、既定値にはしていません。
+指定できる修飾キーは `Ctrl / Alt / Shift / Win`、通常キーは英数字1文字、`F1`〜`F24`、`Enter`、`Esc`、`Space`、`Tab`、矢印キーなどです。`Ctrl+Shift+V` はWindowsやOfficeの「テキストのみ貼り付け」と競合しやすいため、既定値にはしていません。
 
-### UI言語の設定
+### Excel COM連携の注意
 
-UIは、OSの表示言語が日本語の場合は日本語、それ以外の言語環境では英語で表示します。`config.ini` の `[ui] language` で `ja` / `en` / `auto` を指定すると、OS表示言語に関係なくUI言語を上書きできます。
+`prefer_excel = true` の場合、コピー済みclipboardではなく、変換時点のExcel選択範囲が対象になります。選択範囲が変わっていると別の表を変換するため、書式が不要なら既定値の `false` を推奨します。
 
-```ini
-[ui]
-# UI language. auto uses the OS display language.
-# Supported values: auto, ja, en
-language = auto
+タスクトレイからの変換はworker threadで動作します。COM利用時はそのthread内でCOM apartmentを初期化・解放します。
+
+## HTML→GFM変換の安全策
+
+HTMLの文字列が意図せず見出し、引用、リスト、水平線などのGFM block syntaxへ変わらないよう、行頭記号をエスケープします。リンク先の空白・括弧・制御文字もpercent encodingし、Markdownリンクの境界を壊さないようにします。
+
+これは汎用HTML変換器ではありません。画像、複雑なtable、CSSレイアウトなどの忠実な変換が必要な用途は対象外です。
+
+## コード構成
+
+```text
+exceltomarkdown/
+├─ core.py        # quoted TSV、Cell、GFM table
+├─ rich_text.py   # Clipboard HTML→GFM
+├─ config.py      # config.ini、hotkey、i18n
+├─ windows.py     # Win32 clipboard、Excel COM、tray
+└─ cli.py         # command line entry point
 ```
 
-`[ui] language = auto` はUI言語用の自動判定です。`[conversion] default_mode` で内部的に使われる変換モードの `auto` とは別の設定で、変換モード側の `auto` は現在ユーザー設定として指定できません。
+`excel_to_markdown.py` は従来の起動方法・importを維持する互換entry pointです。
 
-### 1回だけ変換して終了（Windowsのみ）
+## 開発
 
 ```powershell
-python excel_to_markdown.py --once
+python -m unittest discover -v
+python -m pip wheel . --no-deps --no-build-isolation
 ```
 
-`--once` はWindowsのクリップボード（および設定に応じてExcel選択範囲）を1回だけ変換して終了します。Windows APIを使うため、Linux/Unix/macOSでは利用できません。
-ショートカットファイルを作成して利用するイメージです。
+CIはUbuntuとWindowsの両方でunit testを実行します。`v*` tagではwheel／source distributionをbuildし、GitHub Releaseへ添付します。
 
-### 標準入力で変換を確認（OSを問わず利用可）
+## ライセンス
 
-```powershell
-Get-Content sample.tsv -Raw | python excel_to_markdown.py --stdin
-```
-
-`--stdin` はWindows APIを使わず、標準入力のTSVをMarkdownへ変換して標準出力へ書き出します。
-
-## Excel書式の反映（任意）
-
-太字、イタリック、リンクを反映したい場合のみ、軽量な標準機能の範囲を超えるため `pywin32` を追加してください。
-
-```powershell
-python -m pip install pywin32
-```
-
-`pywin32` がない環境、または `prefer_excel = false` の環境では、Excelがクリップボードに置いたプレーンテキスト（TSV）だけを使って変換します。`prefer_excel = true` は太字・イタリック・リンクを反映したい場合に有効ですが、Excelの現在選択範囲がコピー済みクリップボード内容と異なる場合は、現在選択範囲が変換対象になります。
-
+[Apache License 2.0](LICENSE)
