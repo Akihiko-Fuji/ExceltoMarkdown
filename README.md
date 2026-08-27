@@ -1,15 +1,15 @@
 # ExceltoMarkdown
 
-Excel・Word・Webブラウザからコピーした内容を、GitHub・Markdown文書・LLMで扱いやすい **GitHub Flavored Markdown（GFM）** へ変換する軽量なクリップボードツールです。
+Excel・Word・Webブラウザからコピーした内容を、GitHub・Markdown文書・LLMで扱いやすい **Markdown** ( GitHub Flavored Markdown（ GFM ）） へ変換する軽量なクリップボードツールです。
 
 このツールは、ExcelをMarkdownで置き換えるものではありません。Excelでの計算・編集・共有はそのまま活かし、結果の一部をGit、文書、AIへ渡す際の摩擦を減らす「変換ブリッジ」です。
 
 > [!IMPORTANT]
-> Excelファイルを完全・可逆に変換することは目的としていません。数式、セル結合、色、罫線、列幅、図形など、GFMで表現できない情報は変換時に失われます。
+> Excelファイルを完全・可逆に変換することは目的としていません。数式、セル結合、色、罫線、列幅、図形など、Markdownで表現できない情報は変換時に失われます。
 
 ## 主な機能
 
-- ExcelからコピーしたTSVをGFM tableへ変換
+- ExcelからコピーしたTSVをMarkdown tableへ変換
 - Excelのquoted TSVを解釈し、セル内改行・タブ・二重引用符を保持
 - WordやブラウザのClipboard HTML Formatから、段落・太字・斜体・リンク・簡易リストを変換
 - Windowsのタスクトレイ、ホットキー、ダブルクリックから変換
@@ -26,10 +26,10 @@ Excel・Word・Webブラウザからコピーした内容を、GitHub・Markdown
 | Excel clipboard TSV | セル文字列、行列構造、quoted field内の改行・タブ・引用符 | 書式、数式そのもの、結合セル、色、罫線、列幅、図形 |
 | Excel COM（任意） | 表示文字列、太字、斜体、ハイパーリンク | 色、罫線、フォントサイズ、数式そのもの、図形 |
 | Word / Web HTML | 段落、改行、太字、斜体、リンク、簡易リスト | レイアウト、画像、複雑なCSS、未対応のHTML構造 |
-| セル内改行 | 改行位置 | GFM table内で `<br>` へ正規化 |
-| GFM table | 行列 | **コピー範囲の先頭行をheader rowとして扱う** |
+| セル内改行 | 改行位置 | Markdown table内で `<br>` へ正規化 |
+| Markdown table | 行列 | **コピー範囲の先頭行をheader rowとして扱う** |
 
-GFM tableにはheader rowとdelimiter rowが必須です。そのため、元データに見出しがなくても先頭行へheaderの意味が付与されます。これは表示上の変換だけでなく、意味上の変換でもあります。
+Markdown tableにはheader rowとdelimiter rowが必須です。そのため、元データに見出しがなくても先頭行へheaderの意味が付与されます。これは表示上の変換だけでなく、意味上の変換でもあります。
 
 ## 変換例
 
@@ -42,7 +42,7 @@ B	20	"2行の
 備考"
 ```
 
-セル内改行がExcelのquoted fieldとして渡された場合、次のGFM tableになります。
+セル内改行がExcelのquoted fieldとして渡された場合、次のMarkdown tableになります。
 
 ```markdown
 | 品名 | 数量 | 備考 |
@@ -53,11 +53,11 @@ B	20	"2行の
 
 ## 説明動画
 
-### Excel表をGFM tableへ変換
+### Excel表をMarkdown tableへ変換
 
 <img width="779" height="360" alt="Excel table conversion demo" src="https://github.com/user-attachments/assets/a7dd24ac-0f1e-45a5-bbb6-f704d6e33150" />
 
-### Word・ブラウザの装飾をGFMへ変換
+### Word・ブラウザの装飾をMarkdownへ変換
 
 <img width="779" height="247" alt="Rich text conversion demo" src="https://github.com/user-attachments/assets/f801dad8-5648-405b-8845-85faef3e4e9c" />
 
