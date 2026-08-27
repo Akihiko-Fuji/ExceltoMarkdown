@@ -244,6 +244,49 @@ class ConversionTests(unittest.TestCase):
             packaged_config.read_text(encoding="utf-8"),
         )
 
+    def test_installed_command_uses_windows_user_config_directory(self):
+        """checkout外のpipコマンドは書き込み可能なユーザー設定を使います。"""
+
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as app_data:
+            with (
+                patch("exceltomarkdown.config.Path.cwd", return_value=Path(directory)),
+                patch("exceltomarkdown.config.sys.platform", "win32"),
+                patch.dict("exceltomarkdown.config.os.environ", {"APPDATA": app_data}, clear=True),
+            ):
+                self.assertEqual(config_path(), Path(app_data) / "ExceltoMarkdown" / "config.ini")
+
+    def test_relative_xdg_config_home_is_ignored(self):
+        """XDG仕様で無効な相対パスは使わず、home直下へフォールバックします。"""
+
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as home:
+            with (
+                patch("exceltomarkdown.config.Path.cwd", return_value=Path(directory)),
+                patch("exceltomarkdown.config.Path.home", return_value=Path(home)),
+                patch("exceltomarkdown.config.sys.platform", "linux"),
+                patch.dict("exceltomarkdown.config.os.environ", {"XDG_CONFIG_HOME": "relative"}, clear=True),
+            ):
+                self.assertEqual(config_path(), Path(home) / ".config" / "exceltomarkdown" / "config.ini")
+
+    def test_absolute_xdg_config_home_is_used(self):
+        """有効な絶対XDG設定ディレクトリはそのまま使います。"""
+
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as config_home:
+            with (
+                patch("exceltomarkdown.config.Path.cwd", return_value=Path(directory)),
+                patch("exceltomarkdown.config.sys.platform", "linux"),
+                patch.dict("exceltomarkdown.config.os.environ", {"XDG_CONFIG_HOME": config_home}, clear=True),
+            ):
+                self.assertEqual(config_path(), Path(config_home) / "exceltomarkdown" / "config.ini")
+
+    def test_checkout_config_takes_precedence_over_user_directory(self):
+        """pipインストール後もcheckoutでの起動は直下の設定を参照します。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            (checkout / "config.ini").write_text("[shortcut]\nkey = Ctrl+Shift+M\n", encoding="utf-8")
+            with patch("exceltomarkdown.config.Path.cwd", return_value=checkout):
+                self.assertEqual(config_path(), checkout / "config.ini")
+
     def test_parse_hotkey_supports_function_keys(self):
         """修飾キー付きのファンクションキーも設定できることを確認します。"""
 
@@ -390,6 +433,16 @@ class ConversionTests(unittest.TestCase):
             log_text = (Path(directory) / "excel_to_markdown_error.log").read_text(encoding="utf-8")
         self.assertIn("COM unavailable", log_text)
         self.assertIn("| A | B |", markdown)
+
+    def test_error_log_creates_user_config_directory(self):
+        """未作成のユーザー設定ディレクトリにもログを書き込めます。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_directory = Path(directory) / "nested" / "ExceltoMarkdown"
+            with patch("exceltomarkdown.windows.app_base_dir", return_value=log_directory):
+                log_path = windows_module.write_error_log(lambda log_file: print("failure", file=log_file))
+            self.assertEqual(log_path, log_directory / "excel_to_markdown_error.log")
+            self.assertEqual(log_path.read_text(encoding="utf-8"), "failure\n")
 
     def test_excel_selection_fallback_continues_when_log_write_fails(self):
         """ログ書き込み先に権限がなくてもクリップボードTSVへフォールバックします。"""
@@ -838,6 +891,17 @@ class ConversionTests(unittest.TestCase):
             markdown,
             "\\# title\n\n\\> quote\n\n\\- item\n\n1\\. item\n\n\\---\n",
         )
+
+    def test_html_block_marker_split_across_inline_nodes_is_escaped(self):
+        """inline要素に分割された行頭記号も意図しないリストにしません。"""
+
+        html = "<div><span>-</span><span> item</span></div><div><span>1</span><span>.</span><span> item</span></div>"
+        self.assertEqual(convert_html_fragment_to_markdown(html), "\\- item\n\n1\\. item\n")
+
+    def test_html_equals_setext_underline_is_escaped(self):
+        """equals形式のsetext下線を文字列のまま維持します。"""
+
+        self.assertEqual(convert_html_fragment_to_markdown("<div>Title<br>===</div>"), "Title\n\\===\n")
 
     def test_html_link_destination_encodes_markdown_delimiters(self):
         """空白や括弧を含むURLでもMarkdownリンクの境界を壊しません。"""

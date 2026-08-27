@@ -528,8 +528,10 @@ def _excel_selection_to_rows() -> list[list[Cell]]:
 def write_error_log(callback) -> Path | None:
     """エラーログを書き込み、書き込み先に権限がない場合は静かに諦めます。"""
 
-    log_path = app_base_dir() / "excel_to_markdown_error.log"
+    log_directory = app_base_dir()
+    log_path = log_directory / "excel_to_markdown_error.log"
     try:
+        log_directory.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as log_file:
             callback(log_file)
     except Exception:

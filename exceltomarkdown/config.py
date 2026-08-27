@@ -133,10 +133,21 @@ def app_base_dir() -> Path:
 
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    source_root = _package_dir().parent
-    if (source_root / CONFIG_FILENAME).exists():
-        return source_root
-    return _package_dir()
+    working_directory = Path.cwd()
+    if (working_directory / CONFIG_FILENAME).is_file():
+        return working_directory
+    if sys.platform == "win32":
+        app_data = os.environ.get("APPDATA")
+        base_directory = Path(app_data) if app_data else Path.home() / "AppData" / "Roaming"
+        return base_directory / "ExceltoMarkdown"
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    configured_directory = Path(config_home) if config_home else None
+    base_directory = (
+        configured_directory
+        if configured_directory is not None and configured_directory.is_absolute()
+        else Path.home() / ".config"
+    )
+    return base_directory / "exceltomarkdown"
 
 
 def resource_path(filename: str) -> Path:
