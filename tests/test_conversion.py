@@ -1,6 +1,7 @@
 import configparser
 import ctypes
 import io
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import excel_to_markdown as e2m
+import exceltomarkdown.config as config_module
+import exceltomarkdown.rich_text as rich_text_module
+import exceltomarkdown.windows as windows_module
 from excel_to_markdown import (
     MOD_ALT,
     MOD_CONTROL,
@@ -148,7 +152,7 @@ class ConversionTests(unittest.TestCase):
     def test_many_self_closing_void_tags_do_not_grow_style_stack(self):
         """大量の自己終了void要素はstyleスタックへ何も積まないことを確認します。"""
 
-        parser = e2m._RichHtmlToMarkdownParser()
+        parser = rich_text_module._RichHtmlToMarkdownParser()
         parser.feed(("<img src='x' />" * 1000) + ("<input value='x' />" * 1000))
         parser.close()
         self.assertEqual(parser._style_marker_stack, [])
@@ -182,10 +186,10 @@ class ConversionTests(unittest.TestCase):
         """HTML Formatがある場合はHTML断片をMarkdown文章へ変換します。"""
 
         with (
-            patch("excel_to_markdown.clipboard_has_format", return_value=True),
-            patch("excel_to_markdown.read_clipboard_html_fragment", return_value='<strong>Bold</strong> <a href="https://example.com">Link</a>'),
-            patch("excel_to_markdown.read_clipboard_plain_text") as read_plain,
-            patch("excel_to_markdown.write_clipboard_text") as write_clipboard_text,
+            patch("exceltomarkdown.windows.clipboard_has_format", return_value=True),
+            patch("exceltomarkdown.windows.read_clipboard_html_fragment", return_value='<strong>Bold</strong> <a href="https://example.com">Link</a>'),
+            patch("exceltomarkdown.windows.read_clipboard_plain_text") as read_plain,
+            patch("exceltomarkdown.windows.write_clipboard_text") as write_clipboard_text,
         ):
             markdown = convert_clipboard_rich_text_to_markdown()
         self.assertEqual(markdown, "**Bold** [Link](https://example.com)\n")
@@ -196,9 +200,9 @@ class ConversionTests(unittest.TestCase):
         """HTML Formatがない場合はCF_UNICODETEXT相当のプレーンテキストを返します。"""
 
         with (
-            patch("excel_to_markdown.clipboard_has_format", return_value=False),
-            patch("excel_to_markdown.read_clipboard_plain_text", return_value="plain text"),
-            patch("excel_to_markdown.write_clipboard_text") as write_clipboard_text,
+            patch("exceltomarkdown.windows.clipboard_has_format", return_value=False),
+            patch("exceltomarkdown.windows.read_clipboard_plain_text", return_value="plain text"),
+            patch("exceltomarkdown.windows.write_clipboard_text") as write_clipboard_text,
         ):
             self.assertEqual(convert_clipboard_rich_text_to_markdown(), "plain text")
         write_clipboard_text.assert_called_once_with("plain text")
@@ -223,6 +227,22 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(hotkey.label, "Ctrl+Alt+M")
         self.assertEqual(hotkey.modifiers, MOD_CONTROL | MOD_ALT)
         self.assertEqual(hotkey.virtual_key, ord("M"))
+
+    def test_default_config_does_not_advertise_unimplemented_rich_text_options(self):
+        """実装が参照しないrich_text設定を公開configへ残しません。"""
+
+        parser = configparser.ConfigParser()
+        parser.read(config_path(), encoding="utf-8")
+        self.assertFalse(parser.has_section("rich_text"))
+
+    def test_packaged_default_config_matches_source_default(self):
+        """source配布とwheel配布で既定設定が分岐しないことを確認します。"""
+
+        packaged_config = Path(config_module.__file__).with_name("config.ini")
+        self.assertEqual(
+            config_path().read_text(encoding="utf-8"),
+            packaged_config.read_text(encoding="utf-8"),
+        )
 
     def test_parse_hotkey_supports_function_keys(self):
         """修飾キー付きのファンクションキーも設定できることを確認します。"""
@@ -266,7 +286,7 @@ class ConversionTests(unittest.TestCase):
         parser = configparser.ConfigParser()
         parser.read_string("[DEFAULT]\nkey = Ctrl+Alt+X\n[shortcut]\nname = ignored\n")
         defaults = parser.defaults()
-        self.assertIsNone(e2m._get_explicit_config_option(parser, "shortcut", "key"))
+        self.assertIsNone(config_module._get_explicit_config_option(parser, "shortcut", "key"))
         self.assertEqual(defaults, {"key": "Ctrl+Alt+X"})
         self.assertIs(parser.defaults(), defaults)
 
@@ -295,7 +315,7 @@ class ConversionTests(unittest.TestCase):
             "  contains: colon\n"
             "key = Ctrl+Alt+M\n"
         )
-        self.assertEqual(e2m._get_section_own_options(parser, "shortcut"), {"notes", "key"})
+        self.assertEqual(config_module._get_section_own_options(parser, "shortcut"), {"notes", "key"})
 
     def test_section_name_containing_bracket_keeps_current_own_option_detection(self):
         """セクション名に]を含む場合でも現在の手動パースで直下オプションを確認します。"""
@@ -303,8 +323,8 @@ class ConversionTests(unittest.TestCase):
         parser = configparser.ConfigParser()
         parser.add_section("short]cut")
         parser.set("short]cut", "key", "Ctrl+Alt+M")
-        self.assertEqual(e2m._get_section_own_options(parser, "short]cut"), {"key"})
-        self.assertEqual(e2m._get_explicit_config_option(parser, "short]cut", "key"), "Ctrl+Alt+M")
+        self.assertEqual(config_module._get_section_own_options(parser, "short]cut"), {"key"})
+        self.assertEqual(config_module._get_explicit_config_option(parser, "short]cut", "key"), "Ctrl+Alt+M")
 
     def test_bold_italic_formatting_uses_triple_marker(self):
         """太字とイタリックを併用するセルはGFM互換の一括マーカーで整形します。"""
@@ -336,9 +356,9 @@ class ConversionTests(unittest.TestCase):
         """変換結果が空なら既存クリップボードを空文字列で上書きしません。"""
 
         with (
-            patch("excel_to_markdown.pywin32_available", return_value=False),
-            patch("excel_to_markdown.read_clipboard_text", return_value=""),
-            patch("excel_to_markdown.write_clipboard_text") as write_clipboard_text,
+            patch("exceltomarkdown.windows.pywin32_available", return_value=False),
+            patch("exceltomarkdown.windows.read_clipboard_text", return_value=""),
+            patch("exceltomarkdown.windows.write_clipboard_text") as write_clipboard_text,
         ):
             self.assertEqual(convert_clipboard_or_excel_selection(prefer_excel=True), "")
         write_clipboard_text.assert_not_called()
@@ -347,9 +367,9 @@ class ConversionTests(unittest.TestCase):
         """Excel選択範囲が大きすぎる場合は古いクリップボード内容へフォールバックしません。"""
 
         with (
-            patch("excel_to_markdown.pywin32_available", return_value=True),
-            patch("excel_to_markdown._excel_selection_to_rows", side_effect=ValueError("too large")),
-            patch("excel_to_markdown.read_clipboard_text") as read_clipboard_text,
+            patch("exceltomarkdown.windows.pywin32_available", return_value=True),
+            patch("exceltomarkdown.windows._excel_selection_to_rows", side_effect=ValueError("too large")),
+            patch("exceltomarkdown.windows.read_clipboard_text") as read_clipboard_text,
         ):
             with self.assertRaises(ValueError):
                 convert_clipboard_or_excel_selection(prefer_excel=True)
@@ -360,11 +380,11 @@ class ConversionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             with (
-                patch("excel_to_markdown.pywin32_available", return_value=True),
-                patch("excel_to_markdown._excel_selection_to_rows", side_effect=RuntimeError("COM unavailable")),
-                patch("excel_to_markdown.app_base_dir", return_value=Path(directory)),
-                patch("excel_to_markdown.read_clipboard_text", return_value="A\tB\n1\t2\n"),
-                patch("excel_to_markdown.write_clipboard_text"),
+                patch("exceltomarkdown.windows.pywin32_available", return_value=True),
+                patch("exceltomarkdown.windows._excel_selection_to_rows", side_effect=RuntimeError("COM unavailable")),
+                patch("exceltomarkdown.windows.app_base_dir", return_value=Path(directory)),
+                patch("exceltomarkdown.windows.read_clipboard_text", return_value="A\tB\n1\t2\n"),
+                patch("exceltomarkdown.windows.write_clipboard_text"),
             ):
                 markdown = convert_clipboard_or_excel_selection(prefer_excel=True)
             log_text = (Path(directory) / "excel_to_markdown_error.log").read_text(encoding="utf-8")
@@ -375,11 +395,11 @@ class ConversionTests(unittest.TestCase):
         """ログ書き込み先に権限がなくてもクリップボードTSVへフォールバックします。"""
 
         with (
-            patch("excel_to_markdown.pywin32_available", return_value=True),
-            patch("excel_to_markdown._excel_selection_to_rows", side_effect=RuntimeError("COM unavailable")),
+            patch("exceltomarkdown.windows.pywin32_available", return_value=True),
+            patch("exceltomarkdown.windows._excel_selection_to_rows", side_effect=RuntimeError("COM unavailable")),
             patch("builtins.open", side_effect=PermissionError("read-only directory")),
-            patch("excel_to_markdown.read_clipboard_text", return_value="A\tB\n1\t2\n"),
-            patch("excel_to_markdown.write_clipboard_text"),
+            patch("exceltomarkdown.windows.read_clipboard_text", return_value="A\tB\n1\t2\n"),
+            patch("exceltomarkdown.windows.write_clipboard_text"),
         ):
             markdown = convert_clipboard_or_excel_selection(prefer_excel=True)
         self.assertIn("| A | B |", markdown)
@@ -396,14 +416,14 @@ class ConversionTests(unittest.TestCase):
         sentinel_error = OSError("GlobalSize failed")
         win_error = Mock(return_value=sentinel_error)
         with (
-            patch("excel_to_markdown.user32", fake_user32),
-            patch("excel_to_markdown.kernel32", fake_kernel32),
+            patch("exceltomarkdown.windows.user32", fake_user32),
+            patch("exceltomarkdown.windows.kernel32", fake_kernel32),
             patch.object(ctypes, "set_last_error", Mock(), create=True),
             patch.object(ctypes, "get_last_error", return_value=8, create=True),
             patch.object(ctypes, "WinError", win_error, create=True),
         ):
             with self.assertRaises(OSError) as context:
-                e2m._read_clipboard_format_bytes(777)
+                windows_module._read_clipboard_format_bytes(777)
         self.assertIs(context.exception, sentinel_error)
         win_error.assert_called_once_with(8)
         fake_kernel32.GlobalLock.assert_not_called()
@@ -419,13 +439,13 @@ class ConversionTests(unittest.TestCase):
             GlobalUnlock=Mock(),
         )
         with (
-            patch("excel_to_markdown.user32", fake_user32),
-            patch("excel_to_markdown.kernel32", fake_kernel32),
+            patch("exceltomarkdown.windows.user32", fake_user32),
+            patch("exceltomarkdown.windows.kernel32", fake_kernel32),
             patch.object(ctypes, "set_last_error", Mock(), create=True),
             patch.object(ctypes, "get_last_error", return_value=0, create=True),
-            patch("excel_to_markdown.ctypes.string_at", return_value=b"abc\0"),
+            patch("exceltomarkdown.windows.ctypes.string_at", return_value=b"abc\0"),
         ):
-            self.assertEqual(e2m._read_clipboard_format_bytes(777), b"abc")
+            self.assertEqual(windows_module._read_clipboard_format_bytes(777), b"abc")
         fake_kernel32.GlobalUnlock.assert_called_once_with(123)
 
     def test_read_clipboard_text_raises_when_global_lock_fails(self):
@@ -442,8 +462,8 @@ class ConversionTests(unittest.TestCase):
         )
         with (
             patch("sys.platform", "win32"),
-            patch("excel_to_markdown.user32", fake_user32),
-            patch("excel_to_markdown.kernel32", fake_kernel32),
+            patch("exceltomarkdown.windows.user32", fake_user32),
+            patch("exceltomarkdown.windows.kernel32", fake_kernel32),
         ):
             with self.assertRaises(MemoryError):
                 read_clipboard_text()
@@ -458,7 +478,7 @@ class ConversionTests(unittest.TestCase):
             AppendMenuW=Mock(),
         )
         app = object.__new__(TrayApplication)
-        with patch("excel_to_markdown.user32", fake_user32):
+        with patch("exceltomarkdown.windows.user32", fake_user32):
             app._show_menu()
         fake_user32.AppendMenuW.assert_not_called()
 
@@ -476,7 +496,7 @@ class ConversionTests(unittest.TestCase):
         app._create_window = Mock(side_effect=lambda: calls.append("create_window"))
         app._add_tray_icon = Mock(side_effect=lambda: calls.append("add_tray_icon"))
 
-        with patch("excel_to_markdown.user32", fake_user32), self.assertRaises(Exception):
+        with patch("exceltomarkdown.windows.user32", fake_user32), self.assertRaises(Exception):
             app.run()
 
         self.assertEqual(calls, ["register_class", "create_window", "register_hotkey"])
@@ -490,7 +510,7 @@ class ConversionTests(unittest.TestCase):
         app.hwnd = 1
         app._icon = 2
         app.hotkey = SimpleNamespace(label="Ctrl+Alt+M")
-        with patch("excel_to_markdown.shell32", fake_shell32):
+        with patch("exceltomarkdown.windows.shell32", fake_shell32):
             app._add_tray_icon()
         fake_shell32.Shell_NotifyIconW.assert_called_once()
 
@@ -500,12 +520,12 @@ class ConversionTests(unittest.TestCase):
 
         fake_user32 = SimpleNamespace(MessageBeep=Mock())
         app = object.__new__(TrayApplication)
-        app._convert_lock = e2m.threading.Lock()
+        app._convert_lock = threading.Lock()
         app._convert_lock.acquire()
         try:
             with (
-                patch("excel_to_markdown.user32", fake_user32),
-                patch("excel_to_markdown.convert_clipboard_to_markdown") as convert,
+                patch("exceltomarkdown.windows.user32", fake_user32),
+                patch("exceltomarkdown.windows.convert_clipboard_to_markdown") as convert,
             ):
                 app._convert_safely()
         finally:
@@ -518,13 +538,13 @@ class ConversionTests(unittest.TestCase):
 
         fake_user32 = SimpleNamespace(MessageBeep=Mock(), MessageBoxW=Mock())
         app = object.__new__(TrayApplication)
-        app._convert_lock = e2m.threading.Lock()
+        app._convert_lock = threading.Lock()
         app.prefer_excel = True
         app.default_mode = "table"
         app.hwnd = 100
         with (
-            patch("excel_to_markdown.user32", fake_user32),
-            patch("excel_to_markdown.convert_clipboard_to_markdown", return_value="markdown") as convert,
+            patch("exceltomarkdown.windows.user32", fake_user32),
+            patch("exceltomarkdown.windows.convert_clipboard_to_markdown", return_value="markdown") as convert,
         ):
             app._convert_safely("rich_text")
         convert.assert_called_once_with("rich_text", prefer_excel=True)
@@ -535,13 +555,13 @@ class ConversionTests(unittest.TestCase):
 
         fake_user32 = SimpleNamespace(MessageBeep=Mock(), MessageBoxW=Mock())
         app = object.__new__(TrayApplication)
-        app._convert_lock = e2m.threading.Lock()
+        app._convert_lock = threading.Lock()
         app.prefer_excel = False
         app.default_mode = "table"
         app.hwnd = 100
         with (
-            patch("excel_to_markdown.user32", fake_user32),
-            patch("excel_to_markdown.convert_clipboard_to_markdown", return_value=""),
+            patch("exceltomarkdown.windows.user32", fake_user32),
+            patch("exceltomarkdown.windows.convert_clipboard_to_markdown", return_value=""),
         ):
             app._convert_safely()
         fake_user32.MessageBeep.assert_not_called()
@@ -552,14 +572,14 @@ class ConversionTests(unittest.TestCase):
 
         fake_user32 = SimpleNamespace(MessageBeep=Mock(), MessageBoxW=Mock())
         app = object.__new__(TrayApplication)
-        app._convert_lock = e2m.threading.Lock()
+        app._convert_lock = threading.Lock()
         app.prefer_excel = False
         app.default_mode = "table"
         app.language = "ja"
         app.hwnd = 100
         with (
-            patch("excel_to_markdown.user32", fake_user32),
-            patch("excel_to_markdown.convert_clipboard_to_markdown", side_effect=RuntimeError("boom")),
+            patch("exceltomarkdown.windows.user32", fake_user32),
+            patch("exceltomarkdown.windows.convert_clipboard_to_markdown", side_effect=RuntimeError("boom")),
             patch("builtins.open", side_effect=PermissionError("read-only directory")),
         ):
             app._convert_safely()
@@ -613,11 +633,11 @@ class ConversionTests(unittest.TestCase):
 
         with (
             patch("sys.platform", "win32"),
-            patch("excel_to_markdown.user32", fake_user32),
-            patch("excel_to_markdown.kernel32", fake_kernel32),
-            patch("excel_to_markdown.shell32", fake_shell32),
+            patch("exceltomarkdown.windows.user32", fake_user32),
+            patch("exceltomarkdown.windows.kernel32", fake_kernel32),
+            patch("exceltomarkdown.windows.shell32", fake_shell32),
         ):
-            e2m._configure_windows_api()
+            windows_module._configure_windows_api()
 
         for api in [*user32_names, *kernel32_names]:
             function = getattr(fake_user32, api, None) or getattr(fake_kernel32, api, None)
@@ -631,7 +651,7 @@ class ConversionTests(unittest.TestCase):
 
         fake_user32 = SimpleNamespace(DefWindowProcW=Mock(return_value=77))
         app = object.__new__(TrayApplication)
-        with patch("excel_to_markdown.user32", fake_user32):
+        with patch("exceltomarkdown.windows.user32", fake_user32):
             self.assertEqual(app._window_proc(1, WM_COMMAND, 9999, 0), 77)
         fake_user32.DefWindowProcW.assert_called_once_with(1, WM_COMMAND, 9999, 0)
 
@@ -659,7 +679,7 @@ class ConversionTests(unittest.TestCase):
         with (
             patch("sys.platform", "linux"),
             patch("sys.stderr", new_callable=io.StringIO) as stderr,
-            patch("excel_to_markdown.convert_clipboard_to_markdown") as convert,
+            patch("exceltomarkdown.cli.convert_clipboard_to_markdown") as convert,
         ):
             self.assertEqual(main(["--once"]), 1)
         convert.assert_not_called()
@@ -672,8 +692,8 @@ class ConversionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config_file = Path(directory) / "config.ini"
             config_file.write_text("[ui]\nlanguage = auto\n", encoding="utf-8")
-            with patch("excel_to_markdown.detect_ui_language", return_value="ja") as detect:
-                self.assertEqual(e2m.load_ui_language_config(config_file), "ja")
+            with patch("exceltomarkdown.config.detect_ui_language", return_value="ja") as detect:
+                self.assertEqual(config_module.load_ui_language_config(config_file), "ja")
         detect.assert_called_once_with()
 
     def test_ui_language_config_can_select_japanese(self):
@@ -682,8 +702,8 @@ class ConversionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config_file = Path(directory) / "config.ini"
             config_file.write_text("[ui]\nlanguage = ja\n", encoding="utf-8")
-            with patch("excel_to_markdown.detect_ui_language", return_value="en") as detect:
-                self.assertEqual(e2m.load_ui_language_config(config_file), "ja")
+            with patch("exceltomarkdown.config.detect_ui_language", return_value="en") as detect:
+                self.assertEqual(config_module.load_ui_language_config(config_file), "ja")
         detect.assert_not_called()
 
     def test_ui_language_config_can_select_english(self):
@@ -692,8 +712,8 @@ class ConversionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config_file = Path(directory) / "config.ini"
             config_file.write_text("[ui]\nlanguage = en\n", encoding="utf-8")
-            with patch("excel_to_markdown.detect_ui_language", return_value="ja") as detect:
-                self.assertEqual(e2m.load_ui_language_config(config_file), "en")
+            with patch("exceltomarkdown.config.detect_ui_language", return_value="ja") as detect:
+                self.assertEqual(config_module.load_ui_language_config(config_file), "en")
         detect.assert_not_called()
 
     def test_ui_language_config_rejects_invalid_language(self):
@@ -703,7 +723,7 @@ class ConversionTests(unittest.TestCase):
             config_file = Path(directory) / "config.ini"
             config_file.write_text("[ui]\nlanguage = fr\n", encoding="utf-8")
             with self.assertRaises(ValueError):
-                e2m.load_ui_language_config(config_file)
+                config_module.load_ui_language_config(config_file)
 
     def test_tr_returns_japanese_message(self):
         """tr()は日本語キーに対応する日本語文言を返します。"""
@@ -725,19 +745,19 @@ class ConversionTests(unittest.TestCase):
         """WindowsではGetUserDefaultUILanguageのprimary language IDで日本語を判定します。"""
 
         fake_kernel32 = SimpleNamespace(GetUserDefaultUILanguage=Mock(return_value=0x0411))
-        with patch("sys.platform", "win32"), patch("excel_to_markdown.kernel32", fake_kernel32):
-            self.assertEqual(e2m.detect_ui_language(), "ja")
+        with patch("sys.platform", "win32"), patch("exceltomarkdown.config.kernel32", fake_kernel32):
+            self.assertEqual(config_module.detect_ui_language(), "ja")
 
     def test_detect_ui_language_uses_locale_on_non_windows(self):
         """非Windowsではロケール名がjaから始まる場合に日本語を選びます。"""
 
         with (
             patch("sys.platform", "linux"),
-            patch("excel_to_markdown.locale.getlocale", return_value=("ja_JP", "UTF-8")),
-            patch("excel_to_markdown.locale.getdefaultlocale", return_value=(None, None)),
-            patch.dict("excel_to_markdown.os.environ", {}, clear=True),
+            patch("exceltomarkdown.config.locale.getlocale", return_value=("ja_JP", "UTF-8")),
+            patch("exceltomarkdown.config.locale.getdefaultlocale", return_value=(None, None)),
+            patch.dict("exceltomarkdown.config.os.environ", {}, clear=True),
         ):
-            self.assertEqual(e2m.detect_ui_language(), "ja")
+            self.assertEqual(config_module.detect_ui_language(), "ja")
 
     def test_default_conversion_mode_config_defaults_to_table(self):
         """default_mode未指定では既存機能維持のためtableを使います。"""
@@ -790,6 +810,96 @@ class ConversionTests(unittest.TestCase):
             config_file = Path(directory) / "config.ini"
             config_file.write_text("[conversion]\nprefer_excel = true\n", encoding="utf-8")
             self.assertTrue(load_prefer_excel_config(config_file))
+
+    def test_quoted_tsv_preserves_embedded_newline_tab_and_quote(self):
+        """Excelのquoted TSVに含まれるセル内改行・タブ・二重引用符を復元します。"""
+
+        source = 'A\tB\n"line1\nline2"\tX\n"tab\tinside"\t"say ""hi"""\n'
+        expected = (
+            "| A | B |\n"
+            "| --- | --- |\n"
+            "| line1<br>line2 | X |\n"
+            '| tab\tinside | say "hi" |\n'
+        )
+        self.assertEqual(convert_text_to_markdown(source), expected)
+
+    def test_quoted_tsv_normalizes_crlf_inside_cell(self):
+        """Windows形式のセル内改行をGFM table内のbrへ正規化します。"""
+
+        source = 'A\tB\r\n"line1\r\nline2"\tX\r\n'
+        self.assertIn("| line1<br>line2 | X |", convert_text_to_markdown(source))
+
+    def test_html_plain_text_does_not_turn_into_block_syntax(self):
+        """HTML内の普通の文字列を見出し・引用・リスト・水平線へ意味変換しません。"""
+
+        html = "<p># title</p><p>> quote</p><p>- item</p><p>1. item</p><p>---</p>"
+        markdown = convert_html_fragment_to_markdown(html)
+        self.assertEqual(
+            markdown,
+            "\\# title\n\n\\> quote\n\n\\- item\n\n1\\. item\n\n\\---\n",
+        )
+
+    def test_html_link_destination_encodes_markdown_delimiters(self):
+        """空白や括弧を含むURLでもMarkdownリンクの境界を壊しません。"""
+
+        html = '<a href="https://example.com/a path/(x)?q=a b">Link</a>'
+        self.assertEqual(
+            convert_html_fragment_to_markdown(html),
+            "[Link](https://example.com/a%20path/%28x%29?q=a%20b)\n",
+        )
+
+    def test_excel_com_initializes_and_uninitializes_worker_thread(self):
+        """Excel COM利用の前後で現在のworker threadのCOM apartmentを管理します。"""
+
+        pythoncom = SimpleNamespace(CoInitialize=Mock(), CoUninitialize=Mock())
+        com_cell = SimpleNamespace(
+            Text="A",
+            Hyperlinks=SimpleNamespace(Count=0),
+            Font=SimpleNamespace(Bold=False, Italic=False),
+        )
+        selection = SimpleNamespace(
+            Rows=SimpleNamespace(Count=1),
+            Columns=SimpleNamespace(Count=1),
+            Cells=Mock(return_value=com_cell),
+        )
+        win32com_client = SimpleNamespace(
+            GetActiveObject=Mock(return_value=SimpleNamespace(Selection=selection))
+        )
+        modules = {"pythoncom": pythoncom, "win32com.client": win32com_client}
+
+        with patch("exceltomarkdown.windows.importlib.import_module", side_effect=modules.__getitem__):
+            rows = windows_module._excel_selection_to_rows()
+
+        self.assertEqual(rows, [[Cell("A")]])
+        pythoncom.CoInitialize.assert_called_once_with()
+        pythoncom.CoUninitialize.assert_called_once_with()
+
+    def test_excel_com_uninitializes_after_get_active_object_failure(self):
+        """Excel取得が失敗してもworker threadのCOM apartmentを必ず解放します。"""
+
+        pythoncom = SimpleNamespace(CoInitialize=Mock(), CoUninitialize=Mock())
+        win32com_client = SimpleNamespace(
+            GetActiveObject=Mock(side_effect=RuntimeError("Excel is not running"))
+        )
+        modules = {"pythoncom": pythoncom, "win32com.client": win32com_client}
+
+        with (
+            patch("exceltomarkdown.windows.importlib.import_module", side_effect=modules.__getitem__),
+            self.assertRaises(RuntimeError),
+        ):
+            windows_module._excel_selection_to_rows()
+
+        pythoncom.CoInitialize.assert_called_once_with()
+        pythoncom.CoUninitialize.assert_called_once_with()
+
+    def test_pywin32_detection_requires_pythoncom(self):
+        """win32comだけが見つかる不完全な環境をCOM利用可能と判定しません。"""
+
+        with patch(
+            "exceltomarkdown.windows.importlib.util.find_spec",
+            side_effect=lambda name: None if name == "pythoncom" else object(),
+        ):
+            self.assertFalse(windows_module.pywin32_available())
 
 
 if __name__ == "__main__":

@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ExceltoMarkdown"
+version = "0.2.0"
+description = "Bridge Excel, Word, and browser clipboard content to GitHub Flavored Markdown"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+  { name = "Akihiko Fuji" },
+]
+keywords = ["excel", "clipboard", "markdown", "gfm", "windows"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Win32 (MS Windows)",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Office/Business",
+  "Topic :: Text Processing :: Markup",
+]
+
+[project.optional-dependencies]
+excel = [
+  "pywin32>=306; platform_system == 'Windows'",
+]
+
+[project.scripts]
+exceltomarkdown = "exceltomarkdown.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Akihiko-Fuji/ExceltoMarkdown"
+Repository = "https://github.com/Akihiko-Fuji/ExceltoMarkdown"
+Issues = "https://github.com/Akihiko-Fuji/ExceltoMarkdown/issues"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["excel_to_markdown"]
+
+[tool.setuptools.packages.find]
+include = ["exceltomarkdown*"]
+
+[tool.setuptools.package-data]
+exceltomarkdown = ["config.ini", "*.ico", "*.png"]
