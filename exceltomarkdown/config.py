@@ -141,7 +141,12 @@ def app_base_dir() -> Path:
         base_directory = Path(app_data) if app_data else Path.home() / "AppData" / "Roaming"
         return base_directory / "ExceltoMarkdown"
     config_home = os.environ.get("XDG_CONFIG_HOME")
-    base_directory = Path(config_home) if config_home else Path.home() / ".config"
+    configured_directory = Path(config_home) if config_home else None
+    base_directory = (
+        configured_directory
+        if configured_directory is not None and configured_directory.is_absolute()
+        else Path.home() / ".config"
+    )
     return base_directory / "exceltomarkdown"
 
 

@@ -255,6 +255,29 @@ class ConversionTests(unittest.TestCase):
             ):
                 self.assertEqual(config_path(), Path(app_data) / "ExceltoMarkdown" / "config.ini")
 
+    def test_relative_xdg_config_home_is_ignored(self):
+        """XDG仕様で無効な相対パスは使わず、home直下へフォールバックします。"""
+
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as home:
+            with (
+                patch("exceltomarkdown.config.Path.cwd", return_value=Path(directory)),
+                patch("exceltomarkdown.config.Path.home", return_value=Path(home)),
+                patch("exceltomarkdown.config.sys.platform", "linux"),
+                patch.dict("exceltomarkdown.config.os.environ", {"XDG_CONFIG_HOME": "relative"}, clear=True),
+            ):
+                self.assertEqual(config_path(), Path(home) / ".config" / "exceltomarkdown" / "config.ini")
+
+    def test_absolute_xdg_config_home_is_used(self):
+        """有効な絶対XDG設定ディレクトリはそのまま使います。"""
+
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as config_home:
+            with (
+                patch("exceltomarkdown.config.Path.cwd", return_value=Path(directory)),
+                patch("exceltomarkdown.config.sys.platform", "linux"),
+                patch.dict("exceltomarkdown.config.os.environ", {"XDG_CONFIG_HOME": config_home}, clear=True),
+            ):
+                self.assertEqual(config_path(), Path(config_home) / "exceltomarkdown" / "config.ini")
+
     def test_checkout_config_takes_precedence_over_user_directory(self):
         """pipインストール後もcheckoutでの起動は直下の設定を参照します。"""
 
