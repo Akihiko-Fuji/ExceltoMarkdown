@@ -185,7 +185,7 @@ python -m pip wheel . --no-deps --no-build-isolation
 64-bit版Python 3.11を使い、dependencyとNuitkaをインストールしてからbuild scriptを実行します。
 
 ```batch
-python -m pip install ".[excel]" "Nuitka==4.2"
+python -m pip install ".[excel]" "Nuitka==4.1.3"
 build_windows.cmd
 ```
 
