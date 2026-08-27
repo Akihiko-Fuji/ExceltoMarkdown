@@ -2,14 +2,18 @@ name: Release
 
 on:
   push:
+    branches:
+      - "improve/windows-x64-release"
     tags:
       - "v*"
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build-python-distributions:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,11 +22,15 @@ jobs:
           python-version: "3.11"
       - name: Test
         run: python -m unittest discover -v
-      - name: Verify tag matches package version
+      - name: Verify package versions
         shell: bash
         run: |
           package_version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
-          test "v${package_version}" = "${GITHUB_REF_NAME}"
+          module_version=$(python -c "import exceltomarkdown; print(exceltomarkdown.__version__)")
+          test "${package_version}" = "${module_version}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            test "v${package_version}" = "${GITHUB_REF_NAME}"
+          fi
       - name: Build distributions
         run: |
           python -m pip install --upgrade build twine
@@ -31,9 +39,88 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: distributions
+          name: release-python-distributions
           path: dist/*
+
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[excel]" "Nuitka==4.2"
+      - name: Test
+        run: python -m unittest discover -v
+      - name: Verify and export version
+        shell: pwsh
+        run: |
+          $packageVersion = python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
+          $moduleVersion = python -c "import exceltomarkdown; print(exceltomarkdown.__version__)"
+          if ($env:GITHUB_REF.StartsWith("refs/tags/") -and "v$packageVersion" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version $packageVersion"
+          }
+          if ($packageVersion -ne $moduleVersion) {
+            throw "Package version $packageVersion does not match module version $moduleVersion"
+          }
+          "EXCELTOMARKDOWN_VERSION=$packageVersion.0" >> $env:GITHUB_ENV
+      - name: Compile standalone application
+        shell: cmd
+        run: build_windows.cmd
+      - name: Package Windows x64 bundle
+        shell: pwsh
+        run: |
+          $bundleName = "ExcelToMarkdown-windows-x64"
+          $archiveName = "$bundleName.zip"
+          $executable = "excel_to_markdown.dist\ExcelToMarkdown.exe"
+          if (-not (Test-Path $executable)) {
+            throw "Nuitka output was not found: $executable"
+          }
+
+          New-Item -ItemType Directory -Path $bundleName | Out-Null
+          Copy-Item -Path "excel_to_markdown.dist\*" -Destination $bundleName -Recurse
+          Copy-Item -Path README.md, CHANGELOG.md, LICENSE -Destination $bundleName
+
+          New-Item -ItemType Directory -Path release-assets | Out-Null
+          Compress-Archive -Path $bundleName -DestinationPath "release-assets\$archiveName"
+
+          $hash = (Get-FileHash "release-assets\$archiveName" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = "$hash  $archiveName`n"
+          $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText(
+            (Join-Path $PWD "release-assets\$archiveName.sha256"),
+            $checksum,
+            $utf8WithoutBom
+          )
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: release-assets/*
+
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build-python-distributions
+      - build-windows-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes --verify-tag
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release-assets/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "ExcelToMarkdown ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag

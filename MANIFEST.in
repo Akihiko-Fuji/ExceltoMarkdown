@@ -1,0 +1,5 @@
+include CHANGELOG.md
+include build_windows.cmd
+include config.ini
+include e2m_ico.ico
+include e2m_ico.png

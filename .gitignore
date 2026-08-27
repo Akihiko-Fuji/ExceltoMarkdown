@@ -32,6 +32,12 @@ MANIFEST
 *.manifest
 *.spec
 
+# Nuitka
+*.build/
+*.dist/
+*.onefile-build/
+ExcelToMarkdown-windows-x64/
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

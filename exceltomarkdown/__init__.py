@@ -66,6 +66,6 @@ from .windows import (
     write_clipboard_text,
 )
 
-__version__ = "0.2.0"
+__version__ = "1.1.0"
 
 __all__ = [name for name in globals() if not name.startswith("_")]
