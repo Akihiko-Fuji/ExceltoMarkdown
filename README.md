@@ -1,6 +1,6 @@
 # ExceltoMarkdown
 
-Excel・Word・Webブラウザからコピーした内容を、GitHub・Markdown文書・LLMで扱いやすい **Markdown** ( GitHub Flavored Markdown（ GFM ）） へ変換する軽量なクリップボードツールです。
+Excel・Word・Webブラウザからコピーした内容を、GitHub・Markdown文書・LLMで扱いやすい **Markdown** (厳密には、GitHub Flavored Markdown） へ変換する軽量なクリップボードツールです。
 
 このツールは、ExcelをMarkdownで置き換えるものではありません。Excelでの計算・編集・共有はそのまま活かし、結果の一部をGit、文書、AIへ渡す際の摩擦を減らす「変換ブリッジ」です。
 
